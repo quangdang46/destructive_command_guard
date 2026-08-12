@@ -65,7 +65,7 @@ Save this as `~/.pi/agent/extensions/dcg-guard.ts` (global) or
 
 ```ts
 // dcg-guard.ts — block destructive shell commands with dcg
-// https://github.com/Dicklesworthstone/destructive_command_guard
+// https://github.com/quangdang46/destructive_command_guard
 import { spawn } from "node:child_process";
 
 const DCG_BIN = process.env.DCG_BIN ?? "dcg";
