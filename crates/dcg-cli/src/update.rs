@@ -16,7 +16,7 @@ use serde::{Deserialize, Serialize};
 pub const CACHE_DURATION: Duration = Duration::from_secs(24 * 60 * 60);
 
 /// GitHub repository owner.
-const REPO_OWNER: &str = "Dicklesworthstone";
+const REPO_OWNER: &str = "quangdang46";
 
 /// GitHub repository name.
 const REPO_NAME: &str = "destructive_command_guard";
@@ -106,7 +106,17 @@ pub struct BackupEntry {
 /// Get the path to the backup directory.
 #[must_use]
 pub fn backup_dir() -> Option<PathBuf> {
-    dirs::data_dir().map(|d| d.join("dcg").join("backups"))
+    // Honor XDG_DATA_HOME / APPDATA before the platform-native data dir. The
+    // `dirs` crate reads Windows known-folders and ignores these env vars, so
+    // a hermetic test/CI home (win_update_rollback.ps1 sets APPDATA/XDG_DATA_HOME)
+    // could not otherwise control where `dcg update --rollback` looks for its
+    // fabricated backups. This mirrors the config/allowlist loaders' HOME-first
+    // resolution.
+    let base = std::env::var_os("XDG_DATA_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("APPDATA").map(PathBuf::from))
+        .or_else(dirs::data_dir)?;
+    Some(base.join("dcg").join("backups"))
 }
 
 fn is_valid_backup_artifact_name(name: &str) -> bool {
@@ -1169,11 +1179,11 @@ mod tests {
     fn test_release_url_for_version_uses_canonical_v_tag() {
         assert_eq!(
             release_url_for_version("v2.1.0"),
-            "https://github.com/Dicklesworthstone/destructive_command_guard/releases/tag/v2.1.0"
+            "https://github.com/quangdang46/destructive_command_guard/releases/tag/v2.1.0"
         );
         assert_eq!(
             release_url_for_version("2.1.0"),
-            "https://github.com/Dicklesworthstone/destructive_command_guard/releases/tag/v2.1.0"
+            "https://github.com/quangdang46/destructive_command_guard/releases/tag/v2.1.0"
         );
     }
 
@@ -1181,7 +1191,7 @@ mod tests {
     fn test_release_url_for_version_empty_uses_latest() {
         assert_eq!(
             release_url_for_version(""),
-            "https://github.com/Dicklesworthstone/destructive_command_guard/releases/latest"
+            "https://github.com/quangdang46/destructive_command_guard/releases/latest"
         );
     }
 
