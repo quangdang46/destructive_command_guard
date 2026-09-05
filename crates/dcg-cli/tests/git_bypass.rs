@@ -1,11 +1,7 @@
 use std::process::Command;
 
 fn dcg_binary() -> std::path::PathBuf {
-    let mut path = std::env::current_exe().unwrap();
-    path.pop(); // deps
-    path.pop(); // debug
-    path.push(format!("dcg{}", std::env::consts::EXE_SUFFIX));
-    path
+    std::path::PathBuf::from(env!("CARGO_BIN_EXE_dcg"))
 }
 
 fn run_hook(command: &str) -> String {
@@ -17,6 +13,11 @@ fn run_hook(command: &str) -> String {
     });
 
     let mut child = Command::new(dcg_binary())
+        // Hook-mode self-heal writes the invoked binary's own path into the
+        // caller's real agent settings, so without this a test run registers
+        // `target/release/dcg` as a global Claude Code PreToolUse hook on the
+        // developer's machine.
+        .env("DCG_SELF_HEAL_HOOK", "0")
         .stdin(std::process::Stdio::piped())
         .stdout(std::process::Stdio::piped())
         .stderr(std::process::Stdio::piped())

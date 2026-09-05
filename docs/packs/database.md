@@ -9,6 +9,8 @@ This document describes packs in the `database` category.
 - [MongoDB](#databasemongodb)
 - [Redis](#databaseredis)
 - [SQLite](#databasesqlite)
+- [BigQuery](#databasebigquery)
+- [Databricks CLI](#databasedatabricks)
 - [Snowflake CLI](#databasesnowflake)
 - [Supabase](#databasesupabase)
 
@@ -346,6 +348,151 @@ To allowlist all rules from this pack (use with caution):
 ```toml
 [[allow]]
 rule = "database.sqlite:*"
+reason = "Your reason here"
+risk_acknowledged = true
+```
+
+---
+
+## BigQuery
+
+**Pack ID:** `database.bigquery`
+
+Protects the `bq` CLI and GoogleSQL against dataset drops, table overwrites, unfiltered DML, and settings that shorten the time-travel recovery window
+
+### Keywords
+
+Commands containing these keywords are checked against this pack:
+
+- `bq`
+- `bigquery`
+- `DROP`
+- `TRUNCATE`
+- `DELETE`
+- `UPDATE`
+- `ALTER`
+- `OVERWRITE`
+- `OR REPLACE`
+- `NOT MATCHED`
+
+### Destructive Patterns (Blocked)
+
+These patterns match potentially destructive commands:
+
+| Pattern Name | Reason | Severity |
+|--------------|--------|----------|
+| `bq-rm-recursive` | bq rm -r deletes a dataset and every table, view, and routine inside it. | critical |
+| `bq-rm-transfer-config` | bq rm --transfer_config deletes a scheduled query or data transfer. | high |
+| `bq-rm-reservation` | bq rm --reservation removes purchased capacity and can change query cost and performance. | high |
+| `bq-rm` | bq rm deletes a table, view, model, or dataset. | high |
+| `bq-load-replace` | bq load --replace overwrites all existing data in the destination table. | high |
+| `bq-query-replace` | bq query --replace overwrites the destination table with the query result. | high |
+| `bq-cp-force` | bq cp -f overwrites the destination table without prompting. | high |
+| `bq-mk-force` | bq mk -f overwrites an existing table definition. | medium |
+| `bq-update-time-travel` | bq update --max_time_travel_hours shortens the only window in which deleted BigQuery data can be recovered. | high |
+| `bq-update-expiration` | bq update --expiration schedules automatic deletion of tables or partitions. | high |
+| `bq-cancel` | bq cancel stops a running job, which may leave a partial load or export. | medium |
+| `drop-schema` | DROP SCHEMA removes a BigQuery dataset and everything inside it. | critical |
+| `drop-snapshot-table` | DROP SNAPSHOT TABLE destroys a point-in-time backup. | critical |
+| `drop-materialized-view-or-external-table` | DROP MATERIALIZED VIEW / EXTERNAL TABLE removes a derived or federated object. | medium |
+| `drop-routine` | DROP FUNCTION/PROCEDURE/TABLE FUNCTION removes a routine other queries may depend on. | high |
+| `drop-model` | DROP MODEL deletes a trained BigQuery ML model. | high |
+| `drop-all-row-access-policies` | DROP ROW ACCESS POLICY removes row-level security from a table. | high |
+| `drop-search-index` | DROP SEARCH INDEX removes an index that must be fully rebuilt. | medium |
+| `drop-capacity-or-reservation` | DROP CAPACITY/RESERVATION/ASSIGNMENT changes billing and query capacity. | high |
+| `drop-view` | DROP VIEW removes a view definition. | medium |
+| `drop-table` | DROP TABLE removes a table and its data. | high |
+| `alter-table-drop-column` | ALTER TABLE DROP COLUMN removes a column and its data. | high |
+| `alter-set-expiration` | SET OPTIONS(expiration_timestamp) schedules automatic deletion. | high |
+| `alter-table-rename` | ALTER TABLE RENAME TO breaks every reference to the old table name. | medium |
+| `create-or-replace-routine` | CREATE OR REPLACE FUNCTION/PROCEDURE overwrites an existing routine definition. | medium |
+| `create-or-replace-table` | CREATE OR REPLACE TABLE discards the existing table and its data. | high |
+| `load-data-overwrite` | LOAD DATA OVERWRITE replaces all existing data in the destination table. | high |
+| `export-data-overwrite` | EXPORT DATA with overwrite=true replaces files at the destination URI. | medium |
+| `truncate-table` | TRUNCATE TABLE removes every row in the table. | high |
+| `delete-all-rows` | DELETE ... WHERE TRUE removes every row in the table. | high |
+| `update-all-rows` | UPDATE ... WHERE TRUE rewrites every row in the table. | high |
+| `merge-delete-not-matched-by-source` | MERGE ... WHEN NOT MATCHED BY SOURCE THEN DELETE removes every target row absent from the source. | high |
+
+### Allowlist Guidance
+
+To allowlist a specific rule from this pack, add to your allowlist:
+
+```toml
+[[allow]]
+rule = "database.bigquery:<pattern-name>"
+reason = "Your reason here"
+```
+
+To allowlist all rules from this pack (use with caution):
+
+```toml
+[[allow]]
+rule = "database.bigquery:*"
+reason = "Your reason here"
+risk_acknowledged = true
+```
+
+---
+
+## Databricks CLI
+
+**Pack ID:** `database.databricks`
+
+Protects against destructive Databricks CLI operations like account workspaces delete, bundle destroy, recursive workspace/fs deletion, permanent cluster deletion, secret-scope removal, arbitrary REST DELETE calls, and high-impact resource deletes
+
+### Keywords
+
+Commands containing these keywords are checked against this pack:
+
+- `databricks`
+- `bundle`
+- `permanent-delete`
+- `delete-scope`
+- `delete-secret`
+- `delete-acl`
+
+### Destructive Patterns (Blocked)
+
+These patterns match potentially destructive commands:
+
+| Pattern Name | Reason | Severity |
+|--------------|--------|----------|
+| `databricks-account-workspaces-delete` | databricks account workspaces delete removes an ENTIRE workspace. | critical |
+| `databricks-bundle-destroy` | databricks bundle destroy permanently deletes every resource the bundle deployed. | critical |
+| `databricks-workspace-delete-recursive` | databricks workspace delete --recursive removes a whole workspace directory tree. | critical |
+| `databricks-workspace-delete` | databricks workspace delete removes a workspace object; deletion cannot be undone. | high |
+| `databricks-fs-rm-recursive` | databricks fs rm -r recursively deletes data in DBFS or Unity Catalog Volumes. | critical |
+| `databricks-fs-rm` | databricks fs rm deletes a file in DBFS or a Unity Catalog Volume. | high |
+| `databricks-clusters-permanent-delete` | databricks clusters permanent-delete removes a cluster rather than terminating it. | critical |
+| `databricks-secrets-delete-scope` | databricks secrets delete-scope removes the scope with ALL its secrets and ACLs. | critical |
+| `databricks-secrets-delete` | databricks secrets delete-secret/delete-acl removes a secret or its access control. | high |
+| `databricks-metastores-delete` | databricks metastores delete removes an entire Unity Catalog metastore. | critical |
+| `databricks-catalogs-delete-force` | databricks catalogs delete --force removes a catalog even when it still contains schemas and tables. | critical |
+| `databricks-catalogs-delete` | databricks catalogs delete removes a Unity Catalog catalog. | high |
+| `databricks-schemas-delete-force` | databricks schemas delete --force removes a schema even when it still contains tables. | critical |
+| `databricks-schemas-delete` | databricks schemas delete removes a Unity Catalog schema. | high |
+| `databricks-apps-delete-auto-approve` | databricks apps delete --auto-approve destroys the app's deployed resources without confirmation. | critical |
+| `databricks-apps-delete` | databricks apps delete removes a Databricks App and its deployed resources. | high |
+| `databricks-account-identity-delete` | databricks account identity deletion removes an account-wide user, service principal, or group. | critical |
+| `databricks-api-delete` | databricks api delete performs an arbitrary REST DELETE against the workspace or account API. | high |
+| `databricks-resource-delete` | databricks resource delete removes a job, pipeline, repo, policy, pool, warehouse, or token. | high |
+
+### Allowlist Guidance
+
+To allowlist a specific rule from this pack, add to your allowlist:
+
+```toml
+[[allow]]
+rule = "database.databricks:<pattern-name>"
+reason = "Your reason here"
+```
+
+To allowlist all rules from this pack (use with caution):
+
+```toml
+[[allow]]
+rule = "database.databricks:*"
 reason = "Your reason here"
 risk_acknowledged = true
 ```

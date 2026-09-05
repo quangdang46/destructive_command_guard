@@ -1,6 +1,6 @@
 [package]
 name = "dcg-cli"
-version = "0.10.0"
+version = "0.14.0"
 edition = "2024"
 authors = [
     "Jeffrey Emanuel <jeff@jeffreyemanuel.dev>",
@@ -13,7 +13,7 @@ license = "MIT"
 keywords = ["destructive", "safety", "claude", "hook", "guard"]
 categories = ["command-line-utilities", "development-tools"]
 readme = "../README.md"
-rust-version = "1.85"
+rust-version = "1.95"
 exclude = [
     ".github/",
     ".beads/",
@@ -44,7 +44,7 @@ serde_yaml = "0.9"          # External pack YAML parsing
 toml = "1.0"
 toml_edit = "0.25"         # Preserves formatting when editing TOML files
 chrono = { version = "0.4", default-features = false, features = ["std", "clock", "serde"] }  # RFC 3339 timestamps
-fancy-regex = "0.18"
+fancy-regex = "0.19"
 regex = "1.10"              # For RegexSet in heredoc detection
 memchr = "2.8"
 aho-corasick = "1.1"        # Multi-pattern string matching for keyword quick-reject
@@ -106,6 +106,14 @@ libc = "0.2"
 
 [build-dependencies]
 vergen-gix = { version = "10.0.0-beta.8", features = ["build", "cargo", "rustc"] }
+# Windows PE metadata (#303): a VERSIONINFO resource (product/company/
+# description/version) and an application manifest. An unsigned, stripped,
+# size-optimized binary with NO version resource is a textbook input to
+# Defender's ML heuristics; the metadata also makes `dcg.exe` identifiable in
+# Explorer / Task Manager. Unconditional because a `[target.'cfg(windows)']`
+# build-dependency is resolved against the HOST, which would drop it on the
+# Linux cross-build; build.rs only invokes it when the TARGET is Windows.
+winresource = { version = "0.1.31", default-features = false }
 
 [dev-dependencies]
 assert_cmd = "2.2"
@@ -147,6 +155,11 @@ rich-output = ["dep:rich_rust"]  # Enable rich_rust for premium terminal output
 all = { level = "warn", priority = -1 }
 pedantic = { level = "warn", priority = -1 }
 nursery = { level = "warn", priority = -1 }
+# `assert!(x.is_empty())` is idiomatic and reads clearly; this lint only asks for
+# `assert_eq!(x, "")` to get a nicer failure message. It fires on hundreds of test
+# assertions here with no defect behind any of them, and the suggestion is
+# type-specific so `clippy --fix` cannot apply it. Allowed per the convention above.
+assert_is_empty = "allow"
 # The pinned release nightly promotes two purely stylistic lints across the
 # entire mature codebase. Keep `-D warnings` meaningful for correctness lints
 # without forcing a behavior-neutral rewrite of hundreds of control-flow sites.
@@ -170,6 +183,11 @@ must_use_candidate = "allow"
 single_match_else = "allow"
 unnested_or_patterns = "allow"
 match_same_arms = "allow"
+# nursery lint with a message near-identical to match_same_arms. Same reasoning: the
+# two sites are long shell-dialect predicates inside the guard that decides whether a
+# destructive command runs; hoisting their shared trailing expression would
+# restructure that control flow for a stylistic gain.
+branches_sharing_code = "allow"
 needless_pass_by_value = "allow"
 similar_names = "allow"
 match_wildcard_for_single_variants = "allow"

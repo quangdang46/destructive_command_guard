@@ -11,6 +11,1028 @@ Repository: <https://github.com/Dicklesworthstone/destructive_command_guard>
 
 ---
 
+## [v0.14.0](https://github.com/Dicklesworthstone/destructive_command_guard/releases/tag/v0.14.0) -- 2026-09-01 [Release]
+
+### Added
+
+- **Databricks pack rules, precision heredoc interpreter scoping, and strict
+  git scoping.** New rules cover destructive Databricks CLI operations
+  (#357, #359); basename-evidence matching closes the false-negative wave
+  from #360/#361; heredoc interpreter scoping stops inert heredoc bodies
+  from tripping embedded-language analysis (#363); and `strict_git` rules
+  are scoped to actual `git` executables (#362), eliminating the
+  `ls .git/rebase-merge` class of false positives.
+- **Doctor per-harness enablement checks (#368).** `dcg doctor` now verifies
+  the gate is actually reachable, not merely installed: a new `codex_hook`
+  check distinguishes Enabled / never-approved / Disabled / NotRegistered
+  states in Codex's `hooks.json` + `config.toml` trust model (`--fix` flips
+  `enabled = true` on an existing entry only — doctor never forges a trust
+  entry), and the OpenCode check byte-compares the installed `dcg-guard.js`
+  plugin against canonical source, so an edited or stubbed plugin surfaces
+  as OUTDATED OR MODIFIED instead of passing as healthy. Both checks fail
+  doctor (and `--strict`) when the hook is present but unreachable.
+
+### Fixed
+
+- **Rescue home-subtree moves and quoted Trash soft-deletes (#371).**
+  `mv-sensitive-source-root-home` and `rm-rf-root-home` each recommended the
+  command the other denies, so no move-then-cleanup could complete inside a
+  home directory. Two narrowly-scoped safe patterns fix the deadlock:
+  in-home renames (both sides ≥ required depth under the same home root, no
+  dotfile trees, no `..`, no dynamic expansion) and the #244 Trash rescue
+  with quoted tokens — quoting was previously a one-directional deny
+  amplifier even though filenames with spaces must be quoted. Rule prose now
+  recommends only remediations that actually run for a home path.
+- **Deny `git show <ref>:<path>` redirected onto the same `<path>` (#373).**
+  The checkout-ref-discard remediation recommended `git show` without
+  warning that redirecting output back onto the shown path reaches the
+  identical overwrite the rule denies — a live agent session followed that
+  guidance and overwrote an uncommitted file. A new sibling rule
+  `show-redirect-overwrite-source` pins redirect target == shown path via
+  backreference (covers `>`, `>>`, `>|`), while captures to a new file and
+  the bare view stay allowed; structured suggestions registered for the new
+  rule.
+- **Treat `git apply` patch heredocs as structured stdin data (#374).** A
+  quoted heredoc containing an ordinary unified diff fed to
+  `git apply --cached` was denied as an unknown embedded language; `git`
+  parses a stdin patch as data in every mode. The structured git stdin-sink
+  proof (#136/#277 machinery) now covers `apply`, with fail-closed edges
+  preserved (`--unsafe-paths`, config-bearing invocations, PATH/alias
+  overrides still refuse the proof).
+- **Cover dashed-builtin spellings narrowed by #362 scoping (#367).** Scoping
+  strict_git rules to `executables=["git"]` silently dropped `git-rebase` /
+  `git-push --force` style dashed spellings; each rule's executables list now
+  includes its dashed form and the push-master/push-main regexes learned the
+  `git-push` spelling, with tests pinning both the restored coverage and the
+  intact #362 narrowing.
+- **Stop hook-mode test spawns from self-healing the caller's real agent hook
+  (#372).** Running the test suite could install the freshly built dev binary
+  as a global Claude Code PreToolUse hook on the developer's machine; the
+  four integration targets that spawn dcg in hook mode now set
+  `DCG_SELF_HEAL_HOOK=0`, keeping the suite hermetic.
+
+### Changed
+
+- Dependency bumps: flate2 1.1.10, tru 0.2.4, which 8.0.6 (PR #369).
+
+---
+
+## [v0.13.9](https://github.com/Dicklesworthstone/destructive_command_guard/releases/tag/v0.13.9) -- 2026-08-27 [Release]
+
+### Fixed
+
+- **Close Windows executable-spelling gaps in scoped pack rules.** Executable
+  scoping now treats `.cmd`, `.bat`, and `.com` like `.exe` in the native Cmd
+  dialect, matching the documented contract and preserving protection through
+  `CALL`, `IF`, `START`, and `FOR`. The Infisical and disclosure rules also
+  match case-insensitive Windows executable names and suffixes explicitly.
+- **Complete opt-in secret-disclosure coverage without blocking help.** The
+  disclosure pack now catches redirected bare Infisical listings, AWS Secrets
+  Manager batch reads, and all decrypted SSM parameter-read variants. Safe
+  `-h`, `--help`, and AWS `help` invocations remain available, including when
+  nested secret reads still require denial. The pack now retains service-tier
+  attribution ahead of the broader Windows egress preset.
+
+---
+
+## [v0.13.8](https://github.com/Dicklesworthstone/destructive_command_guard/releases/tag/v0.13.8) -- 2026-08-27 [Release]
+
+### Added
+
+- **Add explicit Infisical and transcript-disclosure protection.** The new
+  `secrets.infisical` pack blocks destructive secret, folder, dynamic-lease,
+  and local-reset operations. The separate exact opt-in `secret_disclosure` pack
+  blocks value-emitting reads across Infisical, 1Password, Doppler, Vault, AWS
+  Secrets Manager, and decrypted SSM while leaving metadata inspection and
+  direct process injection available. Provider packs retain their existing
+  mutation-only policy unless disclosure protection is explicitly enabled;
+  enabling the `secrets` category alone does not activate it.
+  ([#355])
+
+### Fixed
+
+- **Treat shell line continuations as syntax, not dynamic `mv` paths.** Literal
+  multi-file `mv` commands split with backslash-LF or backslash-CRLF now match
+  their single-line equivalent. Variables, substitutions, doubled
+  backslashes, and in-path escapes remain fail-closed. ([#356])
+
+[#355]: https://github.com/Dicklesworthstone/destructive_command_guard/issues/355
+[#356]: https://github.com/Dicklesworthstone/destructive_command_guard/issues/356
+
+---
+
+## [v0.13.7](https://github.com/Dicklesworthstone/destructive_command_guard/releases/tag/v0.13.7) -- 2026-08-27 [Release]
+
+### Release integrity
+
+- **Ship portable Linux archives without macOS metadata members.** DSR now
+  disables extended attributes as well as macOS copyfile metadata while
+  packaging tar archives. This prevents `._dcg` AppleDouble members from
+  appearing when GNU tar reads a Linux archive, so the strict installer sees
+  exactly the one root-level `dcg` binary it requires. v0.13.7 supersedes the
+  Linux artifacts from v0.13.6; the product changes are otherwise identical.
+
+---
+
+## [v0.13.6](https://github.com/Dicklesworthstone/destructive_command_guard/releases/tag/v0.13.6) -- 2026-08-27 [Release]
+
+The macOS and Windows artifacts passed the public install gate, but the Linux
+archives included a macOS `._dcg` metadata member and were correctly rejected
+by the strict installer. Use v0.13.7 or newer on Linux.
+
+### Fixed
+
+- **Resolve literal executable assignments before per-pack evaluation.**
+  Straight-line POSIX forms such as `d=docker; $d system prune -af` now bind
+  the later segment to Docker and report `containers.docker:system-prune`
+  instead of borrowing flags into an unrelated Git rule. Dynamic assignments
+  remain fail-closed, and evaluated segments cannot hide a destructive command
+  later in the chain. ([#288], [#289])
+- **Allow new literal files inside home-directory worktrees.** A truncating
+  redirect to a currently absent literal target in an existing VCS worktree is
+  treated as creation. Existing files, symlinks, dynamic paths, missing
+  parents, system paths, and `.git` internals remain blocked; `dcg create-new`
+  remains the race-free exclusive-create path. ([#337])
+- **Guard GitHub repository visibility changes.** `gh repo edit --visibility`
+  now requires review under the GitHub platform pack. ([#354])
+
+[#288]: https://github.com/Dicklesworthstone/destructive_command_guard/issues/288
+[#289]: https://github.com/Dicklesworthstone/destructive_command_guard/issues/289
+[#337]: https://github.com/Dicklesworthstone/destructive_command_guard/issues/337
+[#354]: https://github.com/Dicklesworthstone/destructive_command_guard/issues/354
+
+---
+
+## [v0.13.5](https://github.com/Dicklesworthstone/destructive_command_guard/releases/tag/v0.13.5) -- 2026-08-27 [Release]
+
+### Security
+
+- **Fail closed when an update installer checksum is unavailable.** The Unix
+  and Windows update paths now refuse to execute a downloaded installer unless
+  its tag-matched SHA256 sidecar is present and valid. This removes the legacy
+  fallback that could describe an update as verified after continuing past a
+  missing installer checksum. ([#352])
+
+[#352]: https://github.com/Dicklesworthstone/destructive_command_guard/issues/352
+
+---
+
+## [v0.13.4](https://github.com/Dicklesworthstone/destructive_command_guard/releases/tag/v0.13.4) -- 2026-08-27 [Release]
+
+### Release integrity
+
+- **Verify tag-pinned installer bytes before execution.** The real fleet gate
+  now downloads the same tagged `install.sh` / `install.ps1` bytes used by
+  `dcg update`, requires their adjacent SHA256 sidecars, and verifies the digest
+  before invoking either script.
+- **Ship signed installer scripts in the strict DSR contract.** Both installers,
+  their checksum sidecars, and their current-key minisign signatures join the
+  six signed binary archives in the exact public asset set. This closes the
+  installer-authentication gap found while replaying the v0.12.5 updater path.
+  ([#353])
+
+[#353]: https://github.com/Dicklesworthstone/destructive_command_guard/issues/353
+
+---
+
+## [v0.13.3](https://github.com/Dicklesworthstone/destructive_command_guard/releases/tag/v0.13.3) -- 2026-08-27 [Release]
+
+### Release integrity
+
+- **Bind strict DSR binaries to their exact tagged source.** DSR builds from an
+  authenticated tracked-byte snapshot that intentionally excludes `.git`, so
+  v0.13.2 could not expose the full commit SHA required by dcg's absolute
+  latency certificate. DSR now passes its independently verified tag and SHA
+  into every native build; dcg validates both before embedding them. This
+  superseding patch preserves v0.13.2's current-key signatures while restoring
+  the source-to-binary proof required by the release gate.
+
+---
+
+## [v0.13.2](https://github.com/Dicklesworthstone/destructive_command_guard/releases/tag/v0.13.2) -- 2026-08-27 [Release]
+
+### Release integrity
+
+- **Route DSR signing through dcg's current release authority.** The v0.13.1
+  archives were signed on the build coordinator with dcg's retired
+  `36B847D11BA5A0D0` key, so current installers correctly rejected them. This
+  superseding patch is signed on the dedicated signing host with the embedded
+  `69B3955C8D2E62A8` trust root; the product and safety behavior from v0.13.1 is
+  otherwise unchanged.
+
+---
+
+## [v0.13.1](https://github.com/Dicklesworthstone/destructive_command_guard/releases/tag/v0.13.1) -- 2026-08-27 [Release]
+
+This patch release was intended to turn the post-v0.13.0 safety and release
+hardening into a clean, signed distribution. Its published archives were
+mistakenly signed with dcg's retired key and are therefore rejected by current
+installers; v0.13.2 supersedes it. The underlying changes substantially improve
+diagnostics, external-pack validation, OMP lifecycle safety, and the quality of
+suggested alternatives after a block.
+
+### Security
+
+- **Unverified commands no longer fail open for unattended agents.** Commands
+  that cannot be evaluated completely, including deadline exhaustion and
+  incomplete nested evaluation, retain an indeterminate decision and are
+  denied when the host cannot ask for review.
+- **Filesystem coverage now catches unbounded non-recursive glob deletion.**
+  Risky `rm` expansions no longer evade the recursive-delete rules merely by
+  omitting `-r`; bounded scratch-directory operations retain their narrow safe
+  path.
+- **External packs validate executable scope canonically.** Pack authors get a
+  concrete validation error when a rule's declared executable scope and its
+  regex semantics disagree, preventing broad or misleading attribution.
+- **OMP's native bridge has a tighter trust boundary.** The generated extension
+  binds to the installed `dcg` binary, rejects lossy executable paths, preserves
+  signal provenance, bounds child observation and stream resources, and keeps
+  host-owned hook fields during self-healing.
+
+### Added
+
+- **Pack validation is wired into the CLI.** Custom-pack authors can validate
+  schema and semantic problems before enabling a pack, with focused diagnostics
+  for executable scopes and rule definitions. ([#289])
+- **Release-grade performance certificates.** The absolute evaluator budget
+  gate now binds results to the full source commit, verifies every timed wire
+  decision, applies an explicit 95/95 tail-tolerance rule, and emits a
+  self-contained failure certificate outside the measured checkout.
+- **More complete integration management.** CLI and installer flows can inspect
+  and unconfigure supported agent integrations explicitly, with stronger
+  ownership checks and truthful dry-run/summary behavior across Unix and
+  Windows.
+
+### Fixed
+
+- **Normal upgrades can consume aggregate checksums.** The POSIX installer now
+  falls back from an adjacent `<archive>.sha256` file to `SHA256SUMS.txt` or
+  `SHA256SUMS`, matching the PowerShell installer and repairing the tag-pinned
+  updater path reported in [#342].
+- **Official binaries have exact release provenance.** The release path now
+  rejects dirty or ahead-of-tag binaries before signing, preventing the
+  `LocalAheadOfRelease` false classification reported in [#344].
+- **Every archive is signed by the DSR release authority.** The six platform
+  archives publish adjacent `.minisig` files under the documented long-lived
+  key, repairing the fail-closed installer path reported in [#351].
+- **Pipeline diagnostics preserve the command users actually wrote.** Shell
+  transformations no longer erase syntax needed for matching and explanations;
+  unverifiable Python-to-PowerShell pipelines identify the producer that could
+  not be modeled instead of presenting an opaque refusal.
+- **Safer alternatives are operation-specific.** Suggestions now reflect the
+  destructive operation's flags and target shape, and their classifier rules
+  are checked for self-consistency.
+- **Windows and hook protocol tests are host-independent.** Fixtures isolate
+  ambient Git/configuration state, choose current-platform binary names, and
+  reject stale Windows binaries instead of silently exercising old bytes.
+
+[#289]: https://github.com/Dicklesworthstone/destructive_command_guard/issues/289
+[#342]: https://github.com/Dicklesworthstone/destructive_command_guard/issues/342
+[#344]: https://github.com/Dicklesworthstone/destructive_command_guard/issues/344
+[#351]: https://github.com/Dicklesworthstone/destructive_command_guard/issues/351
+
+---
+
+## [v0.13.0](https://github.com/Dicklesworthstone/destructive_command_guard/releases/tag/v0.13.0) -- 2026-08-24 [Release]
+
+Minor bump: this release adds first-class support for a new agent host (Oh My Pi)
+across detection, install, uninstall and doctor, and closes a config-override
+bypass that could allow an unexamined command.
+
+### Security
+
+- **An `[overrides] allow` entry no longer speaks for the rest of a compound
+  command.** Allow patterns are substring-matched, and the allow check runs
+  *before* pack evaluation, so a single entry matching one segment returned
+  `allowed` for text that was never examined — an entry naming a scratch path
+  also allowed whatever followed the `&&`. A safe segment silencing a
+  destructive one is the same bypass class `split_command_segments` already
+  closes for pack patterns, so allow overrides now clear each segment on its
+  own terms: a single-segment command keeps the previous whole-string
+  semantics, and a compound command is allowed only when every segment is
+  itself allowed. Anything uncovered falls through to normal evaluation.
+  Command substitutions are segments too, so a safe outer command cannot
+  carry a destructive inner one past the check.
+
+  As a side effect, anchored entries now compose across a chain for the first
+  time: `^a$` and `^b$` previously allowed neither half of `a && b`, because
+  neither matched the whole string. ([#340])
+
+### Added
+
+- **First-class Oh My Pi (`omp`) agent support** in detection, CLI, and
+  `dcg doctor`, with easy-mode installers and uninstallers taught about it and
+  a symmetric uninstall path. The generated OMP extension bridge carries schema
+  validation and health checks, monotonic child-transition handling, refined
+  timeout and process-signal handling, and dynamic shell-dialect selection for
+  eligible local PTYs. Agent coverage in the installer was expanded alongside
+  it. ([#335])
+
+### Fixed
+
+- **`dcg doctor` no longer undercounts enabled packs.** It counted the raw
+  enabled-pack set, which carries the bare `core` category marker, while
+  `dcg packs --enabled` lists the two registry leaves that marker expands into
+  (`core.filesystem`, `core.git`). The two numbers disagreed by exactly one in
+  every configuration. Doctor now counts registry leaf packs, so both agree.
+  No protection was missing; only the reported count was wrong. ([#335])
+- **A block message no longer grows with the command it is reporting on.** The
+  message becomes the hook's `permissionDecisionReason`, which lands in an
+  agent's context and is replayed on every later turn, and it embedded the
+  command verbatim: a 10 KB heredoc write produced a ~10.8 KB reason and a
+  50 KB one produced ~50.8 KB, while the stderr box stayed a constant ~2 KB.
+  The echoed command is now capped and the reason reports how many bytes were
+  elided, which is the useful signal. Ordinary commands are untouched and stay
+  copy-pasteable. ([#339])
+- **OMP hardening:** invalid profile environments are rejected, commands are
+  evaluated in the effective cwd, agent policy is applied in robot mode, the
+  installer conflict summary is preserved, project extensions are anchored to
+  cwd, and `PI_CONFIG_DIR` is honored when detecting OMP. PowerShell installer
+  and uninstaller handle Windows OMP config paths correctly.
+- **Install path:** the OpenCode plugin and OMP extension are written
+  atomically, a non-UTF-8 `dcg` path is refused rather than embedded in
+  generated JavaScript, and the native-integration install flags are mutually
+  exclusive.
+- **E2E harness:** the matrix no longer swallows failures inside `&&` / `||`
+  chains.
+
+[#335]: https://github.com/Dicklesworthstone/destructive_command_guard/issues/335
+[#339]: https://github.com/Dicklesworthstone/destructive_command_guard/issues/339
+[#340]: https://github.com/Dicklesworthstone/destructive_command_guard/issues/340
+
+---
+
+## [v0.12.5](https://github.com/Dicklesworthstone/destructive_command_guard/releases/tag/v0.12.5) -- 2026-08-23 [Release]
+
+### Security
+
+- **Shell long options no longer hide a piped or process-substituted
+  payload.** A shell consumer carrying an unrecognized no-value long option
+  (`bash --norc`, `--posix`, `--login`, `--noprofile`, and `sh` equivalents)
+  was read as if the option were a script-file operand, so
+  `echo 'rm -rf ~' | bash --norc` and `bash --norc <(echo 'rm -rf ~')` were
+  **allowed**. The shell still reads its program from stdin / the substitution,
+  so the payload is now scanned. Value-taking (`--rcfile`, `--init-file`) and
+  terminal (`--`, `--help`, `--version`, `--command`) long options are
+  classified precisely.
+- **`--rcfile` / `--init-file` process substitutions are treated as executing
+  sinks.** An interactive shell sources its init file at startup, and that file
+  may be a process substitution: `bash --init-file <(…) -i` runs the
+  substitution's output (verified on macOS and Linux). The marker was swallowed
+  as an inert option value, allowing the payload; it is now evaluated as the
+  shell's source. `-o` / `-O` still consume their set-option/shopt name (which
+  bash rejects rather than executes).
+
+### Fixed
+
+- **Rebase-recovery no longer unlocks a `git` command against the wrong
+  repository.** The recovery-mode `cwd` resolver now fails closed when a `cd`
+  cannot reach the `git` segment through a subshell separator
+  (`cd repo & git restore`, `cd repo | git restore`), when git-repo-redirecting
+  environment assignments (`GIT_DIR=`, `GIT_WORK_TREE=`, …) re-point git, and
+  on `pushd -n` / bare `pushd`, which do not change the working directory the
+  way the walk assumed.
+- **Denials name the allow-once remedy.** The `permissionDecisionReason` now
+  states the scoped `dcg allow-once <code>` command for harnesses that surface
+  only the reason string, and the operator banner lists it above
+  `dcg allowlist add` (GH #332).
+
+### Added
+
+- **New `database.databricks` pack.** Guards destructive Databricks CLI
+  operations (executable-scoped), included in the `careful_company` preset
+  (GH #333).
+
+## [v0.12.4](https://github.com/Dicklesworthstone/destructive_command_guard/releases/tag/v0.12.4) -- 2026-08-23 [Release]
+
+### Security
+
+- **Quoted `rm` flags no longer bypass the always-on `rm -rf` guard
+  (bd-5xgt).** bash concatenates adjacent quoted/unquoted characters, so
+  `rm -r'f' /` (and `rm -'r'f /`, `rm -r"f" /`, `rm '-r'f /`) really runs
+  `rm -rf /` — but dcg **allowed** them, because the `rm` flag char-class
+  matching saw the literal quote and stopped. This defeated dcg's flagship
+  protection cross-platform via trivial quote insertion. `rm` option-position
+  tokens are now dequoted (balanced single/double quotes and backslash
+  escapes) before flag parsing; since option tokens are always executed
+  syntax rather than data, this cannot turn a quoted-data mention into a
+  false positive. `core.git` was unaffected; quoted data arguments
+  (`echo 'rm -rf /'`, `grep 'rm -rf' file`) stay allowed; an unbalanced quote
+  is a shell syntax error that never runs `rm` and stays allowed. Found via
+  the `fuzz_normalize` idempotence invariant, then confirmed against real
+  bash argv. Regression corpus: `tests/corpus/bypass_attempts/quoted_flags.toml`.
+- The `fuzz_normalize` harness length invariant was corrected: normalization
+  *canonicalizes* (it inserts a separator when a redirect operator is glued to
+  the preceding token) and can grow by a bounded amount, so the check now
+  guards against pathological growth while keeping the load-bearing idempotence
+  assertion.
+
+---
+
+## [v0.12.3](https://github.com/Dicklesworthstone/destructive_command_guard/releases/tag/v0.12.3) -- 2026-08-22 [Release]
+
+### Security
+
+- **Bare `cmd`/`pwsh` reading piped or redirected stdin as commands is now
+  guarded on the cmd/PowerShell dialects (bd-1o5h).** A shell consuming piped
+  source runs its program from stdin, but the executing-sink pipeline analysis
+  was bash-AST/POSIX-only, so `echo del /s /q C:\x | cmd`, `echo "Remove-Item …"
+  | pwsh`, `type payload.txt | cmd`, and the `cmd < payload.bat` /
+  `pwsh < script.ps1` redirect forms ran the payload unguarded — while
+  `cmd /c "…"`, `powershell -`, and the whole POSIX `| bash` side already
+  denied. A native cmd/PowerShell pipeline collector now reuses the existing
+  `cmd_pipeline_input_mode` / `powershell_pipeline_input_mode` consumer helpers:
+  a statically-known producer piped into a bare stdin-reading shell is
+  evaluated as that shell's source, and a `<`-redirected file into such a shell
+  fails closed. Only a bare stdin-reading shell consumer triggers a sink, so
+  ordinary pipelines (`| findstr`, `| Where-Object`, `| Out-File`, `| clip`,
+  `cmd /c …`, `pwsh -File …`) are untouched. Found in the v0.12.2 adversarial
+  sweep; regression suite `tests/repro_1o5h_cmd_pwsh_stdin_consumer.rs`.
+
+---
+
+## [v0.12.2](https://github.com/Dicklesworthstone/destructive_command_guard/releases/tag/v0.12.2) -- 2026-08-22 [Release]
+
+### Security
+
+- **A redirect or stdin device on a piped/substituted shell defeated the
+  executable-source analysis.** Found in an adversarial sweep of the v0.12.1
+  heredoc-pipeline fix. A shell consuming piped or process-substituted source
+  reads its program from stdin (or the substitution file), but a redirection
+  operator on that consumer was mistaken for a script-file operand and
+  flipped the verdict to "the shell runs nothing", allowing the payload:
+  - `… | bash 2>/dev/null` / `… | bash >log 2>&1` — an output redirect on the
+    piped shell;
+  - `… | bash /dev/stdin` / `bash /dev/fd/0` — the shell reads the pipe as a
+    file through the stdin device;
+  - `bash 2>/dev/null <(echo …)` — the same on a process-substitution
+    consumer (bash and interpreter forms).
+  Redirection operators are now classified (`classify_shell_positional`) and
+  skipped when scanning a consumer's arguments; stdin-device operands are
+  recognized as reading the pipe, and a genuine stdin *reassignment*
+  (`bash < file`) fails closed. Legit pipelines whose consumer runs a real
+  script file (`… | bash deploy.sh`) or a data tool (`… | grep`, `… | wc`)
+  are unchanged. Regression suite:
+  `tests/repro_heredoc_pipeline_producer_bypass.rs`.
+
+---
+
+## [v0.12.1](https://github.com/Dicklesworthstone/destructive_command_guard/releases/tag/v0.12.1) -- 2026-08-22 [Release]
+
+### Security
+
+- **A heredoc piped into a shell or interpreter bypassed every rule
+  (shipped in v0.11.0 – v0.12.0).** `cat <<'EOF' | bash … EOF` (also `| sh`,
+  `| bash -s`, `| python3`, `| sudo bash`, `| env bash`) executed its body
+  unguarded: tree-sitter-bash attaches the pipeline of a heredoc-carrying
+  statement to the `heredoc_redirect` node, so the `pipeline` node begins
+  with the `|` operator and has no producer stage, and the executable-sink
+  collector — which only inspected consumers at index ≥ 1 of a pipeline's
+  stages — never saw the consumer at all, while the data-sink masking
+  treated the `cat` heredoc as inert prose. The producer is now synthesized
+  from the enclosing statement and the body is evaluated as the consumer's
+  source exactly like `echo … | bash`; a heredoc fed to a shell through a
+  non-`cat` producer (`tee x <<EOF | bash`, `sed … <<EOF | bash`) fails
+  closed as `heredoc.posix:pipeline-consumer`. Data consumers are
+  untouched (`cat <<'EOF' | grep -c rm`, `| wc -l`, `| tee notes.md`).
+  Regression suite: `tests/repro_heredoc_pipeline_producer_bypass.rs`.
+- **`dcg hook` batched envelopes resolve every entry before one speaks.**
+  Follow-up to the #330 fix: the VS Code Agent Host `toolCalls[]` loop
+  stopped at the first evaluator-level non-allow entry, which `[policy]`
+  could now turn into a `warn`/`log` allow — so a destructive entry later in
+  the same batch was never evaluated. Every entry is now resolved (verdict
+  and policy mode) and the highest-ranked one speaks for the line:
+  deny > indeterminate > ask > warn > log > allow. This mirrors the
+  resolve-all-then-rank flow bare `dcg` already used.
+- **Rebase recovery re-checks the rest of the line (see Fixed, #331).**
+  `git restore -- f; git reset --hard` and cross-repository
+  `cd <rebasing> && git restore -- f && cd <other> && git restore -- g` were
+  allowed outright during an in-progress rebase on v0.12.0.
+
+### Fixed
+
+- **`dcg hook` now honours `[policy]` mode overrides (#330).** The JSONL
+  subcommand evaluated commands without resolving the active policy, so a
+  rule downgraded to `warn` or `log` via `[policy] default_mode`,
+  `[policy.packs]`, or `[policy.rules]` still produced `{"decision":"deny"}`
+  — while `dcg test` reported `WARN (policy allows)` for the same config.
+  `dcg hook` now runs the same resolver as bare `dcg` and `dcg test`:
+  `warn`/`log` matches report `"decision":"allow"` (warn also announces the
+  relaxed rule on stderr), `ask` stays `deny` because the protocol has no
+  review channel, and a new additive `"mode"` field names the resolved mode
+  on every matched line. Explicit `[overrides].block` entries, the
+  critical-severity floor on broad policies, and severity-default modes
+  (`git stash drop` warns by default) behave identically in both entry
+  points, pinned by a parity suite.
+- **Rebase recovery probes the repository the command actually reaches
+  (#331).** The auto-allow for an in-progress rebase and the
+  `dcg rebase-recover` permit were resolved against the hook's cwd, so the
+  common `cd <worktree> && git restore --ours -- f` phrasing was denied (and
+  a freshly minted permit left unconsumed) exactly when the documented
+  recovery flow was being followed. The probe now starts from the
+  harness-reported `cwd` (falling back to the hook process cwd) and follows
+  a leading static `cd` / `pushd` and a `git -C <literal>` on the guarded
+  segment. Anything dcg cannot attribute statically — expansions,
+  subshells, `cd -`, `popd`, `--git-dir`/`--work-tree`, a directory that
+  does not exist — keeps the deny.
+- **A recovery signal unlocks the recovery rules, never the whole line.**
+  Found while reviewing #331: the first recovery-eligible match converted
+  the deny into an allow without re-checking the rest of the command, so
+  `git restore -- f; git reset --hard` ran unguarded inside a rebasing repo,
+  and a second `git restore` after a further `cd` ran in a repository the
+  probe never looked at. The command is now re-evaluated with exactly the
+  four recovery rules granted; any other finding keeps its own verdict, the
+  permit is spent only when the line actually runs, and a trailing command
+  that could move the shell (a script, `bash -c`, `eval`, `xargs`, …)
+  closes the window for that line. The block text now says the retry must
+  be the recovery command on its own line (a leading `cd <repo> &&` is
+  fine).
+- **Windows binaries carry a VERSIONINFO resource and application manifest
+  (#303).** `dcg.exe` shipped unsigned, stripped, size-optimized, and with
+  no version resource at all — close to a worst-case input for Defender's
+  `!ml` heuristics (`Trojan:Win32/Bearfoos.B!ml`) and anonymous in Explorer
+  and AV submissions. `build.rs` now embeds product/company/description/
+  version metadata and an `asInvoker` manifest (long-path and UTF-8 aware)
+  on Windows targets; a missing resource compiler degrades to a cargo
+  warning, never a failed build. Metadata only — no code path changes.
+  Authenticode signing remains the durable fix and is tracked separately.
+
+### Changed
+
+- The prose-through-a-data-sink posture from #329 is pinned by tests:
+  `cat > notes.md <<'EOF' … EOF` bodies are data in every spelling, executing
+  sinks (`bash <<EOF`, `… | bash`) still block, and inline interpreter
+  literals (`python3 -c "print(\"rm -rf\")"`) deliberately stay on the
+  conservative raw-shell scan (#136 / #278). No behavior change: the
+  reported block (against 0.11.1) does not reproduce on current `main`.
+
+## [v0.12.0](https://github.com/Dicklesworthstone/destructive_command_guard/releases/tag/v0.12.0) -- 2026-08-20 [Release]
+
+### Added
+
+- **`ssh <host> '<command>'` remote payloads are scanned (#326).** ssh
+  concatenates every argv word after the destination and hands the result to
+  the remote login shell — an inline-shell wrapper exactly like `sh -c`, minus
+  the flag. dcg treated the quoted payload as opaque argv data, so
+  `ssh host 'dropdb mydb'` rode through while the unquoted spelling was
+  denied — a false negative in precisely the remote-execution direction. The
+  heredoc pipeline now extracts the payload (walking the modeled OpenSSH
+  option grammar to locate the destination: bundled flags, attached values
+  like `-p2222`, separate values like `-o X=y`, and `--`) and recursively
+  evaluates it, so quoted and unquoted spellings reach the same decision and
+  every enabled pack applies to the remote command. Read-only remote
+  diagnostics (`uptime`, `df -h`, `journalctl …`) stay allowed, the payload's
+  own quoting still classifies remote data as data
+  (`ssh h 'echo "dropdb mydb"'` passes), `echo`/`grep`/commit-message
+  mentions of ssh stay inert, and an unmodeled ssh option makes extraction
+  bail to the previous behavior rather than guess at the destination (a real
+  ssh refuses unknown options anyway). The opt-in `remote.ssh` pack is
+  unchanged and still adds its curated remote-execution rules on top.
+
+### Fixed
+
+- **The dead `overrides.allowlist` / `overrides.allowlist_rules` config keys
+  are removed and loudly reported (#327).** Both keys parsed, appeared in
+  `dcg config schema` with worked examples, and were never consulted: the
+  config layer merge only carried `overrides.allow`/`block`, so the
+  documented path-scoped allowlisting silently had no effect (and the dead
+  compile path behind it ignored `paths` anyway — wiring it up as parsed
+  would have granted path-scoped configs *global* allowances). The keys are
+  gone from the schema (`config.schema.json` regenerated); a config still
+  carrying them parses, grants nothing, and is now named explicitly by
+  `dcg config` (a `Warnings:` section), `dcg config --format json` (a
+  `warnings` array plus `overrides.removed_keys_present`), and `dcg doctor`'s
+  configuration check, each pointing at the surfaces that work:
+  `overrides.allow`, per-rule `exempt_target_globs`, and `dcg allowlist add`.
+  Closing the report's observability gap, `dcg config --format json` now also
+  echoes the enforcement-relevant `overrides`, `rules`, and `policy` sections
+  (deterministically ordered), so CI can assert what is actually loaded
+  instead of inferring it from `dcg test` decisions.
+
+- **`redirect-truncate-root-home` no longer recommends an alternative it then
+  denies (#316 follow-up).** The rule's "Make a backup" suggestion —
+  `cp <file> <file>.bak && echo data > <file>` — still ends in a truncating
+  redirect onto the same home/system path, so an agent that instantiated it
+  from the triggering command was denied again by the same rule. The
+  suggestion (block-message prose and the structured `PatternSuggestion`) now
+  routes the write through a temp file: `cp <file> <file>.bak &&
+  echo data > /tmp/<subdir>/out && cp -f /tmp/<subdir>/out <file>`, which the
+  hook allows end-to-end even for home targets. Two sibling rows with the
+  same latent trap were fixed in the same pass: the `truncate` rules'
+  "keep the first N bytes" suggestion (`head -c N <file> > <file>.head` —
+  a home-path redirect) now writes the head through `/tmp` and `cp -f`s it
+  into place, and `mv-sensitive-source-root-home`'s in-place-rename
+  suggestion (`mv <file> <file>.deleted-YYYYMMDD` — itself an mv touching a
+  sensitive path) is now marked gated, so it renders with the explicit
+  "dcg gates this too — it needs explicit approval" marker
+  (`mv-dynamic-path` got its own suggestion set where the literal rename
+  stays ungated, since a resolved literal rename is exactly the escape from
+  that denial). The #316 suggestion self-consistency sweep now instantiates
+  `{path}` with a home path (in addition to the relative path) for every rule
+  whose name carries `root-home`/`sensitive` — the configuration the original
+  sweep never exercised, which is why this row survived it — and requires
+  gated suggestions to be denied in at least one applicable profile.
+
+## [v0.11.1](https://github.com/Dicklesworthstone/destructive_command_guard/releases/tag/v0.11.1) -- 2026-08-19 [Release]
+
+### Added
+
+- **First-party OpenCode support (#318).** `dcg install --opencode` writes a
+  native `tool.execute.before` plugin to
+  `~/.config/opencode/plugins/dcg-guard.js` (`--project` for
+  `<repo>/.opencode/plugins/`). The plugin routes every OpenCode `bash` tool
+  call through dcg's Claude-compatible hook protocol — spawning the absolute
+  dcg path embedded at install time with `OPENCODE=1` so the agent is
+  identified — and aborts the tool call by throwing on a `deny` (an `ask`
+  verdict also fails closed; OpenCode has no operator-review state).
+  Infrastructure failures (dcg missing) fail open with a stderr notice. The
+  file carries a `dcg-opencode-plugin` ownership marker: the installer refuses
+  to overwrite a user-owned file of that name even with `--force`, and
+  `uninstall.sh` deletes only marker-carrying files. `install.sh` configures
+  OpenCode automatically when detected, `dcg doctor` gains an
+  `opencode_plugin` check (an error + `--fix`able when OpenCode is in use but
+  unguarded — there is no Claude-compat fallback), and `Agent::OpenCode` is
+  detected from the plugin's `OPENCODE=1`. New
+  `docs/opencode-integration.md`. Motivated by a real shared-environment
+  outage where a green doctor coexisted with an entirely unguarded OpenCode
+  install.
+- **`dcg update` can no longer silently replace a local build that is ahead of
+  its release (#320).** Build provenance (`git describe --tags --dirty`, plus
+  an explicit `DCG_RELEASE_BUILD=1` marker exported by dist.yml and the DSR
+  runbook) is embedded at compile time and shown as a `Commit:` line in
+  `dcg --version`. `dcg update` now refuses — before any network or installer
+  work — when the installed binary is a local build ahead of its release tag,
+  or when the install is pinned via the new `general.update_pin` config
+  (`DCG_UPDATE_PIN` env). The explicit escape hatch is
+  `dcg update --replace-local-build`. Pinned installs also suppress the
+  background "update available" nudge, and a new warning-only doctor check
+  (`build_provenance`) flags the unpinned-local-ahead state that is one
+  routine update away from silent coverage loss.
+- **Suggestions dcg itself gates are now labeled, machine-checked, and
+  consistent (#316).** `PatternSuggestion` gained a `gated` flag: a gated
+  suggestion is a *less* destructive form of the blocked operation that still
+  requires approval, and every renderer now says so explicitly ("dcg gates
+  this too — it needs explicit approval" in block output, `[gated: ...]` in
+  `dcg packs`/classify text, a `gated` field in JSON) so an agent reading the
+  block message stops retrying suggestions dcg will deny. The 14 remaining
+  self-denied suggestions from the #316 sweep are either fixed or marked
+  gated: the MySQL `TRUNCATE`⇄`DELETE` mutual-referral loop is broken (backup
+  suggestion first, gated cross-references labeled), the kamal proxy rules
+  gained `kamal proxy restart` as a runnable first alternative,
+  `core.git:branch-dynamic-token` now leads with the workflow fix that
+  actually works and clarifies that quoting protects a *creation* while a
+  literal `-D` stays gated, and the docker/kubectl/postgres/bigquery/
+  guardrails/github rows carry accurate gated markers. Two registry-wide
+  tests enforce the invariant in both directions (every non-gated suggestion
+  is allowed by its own pack; every gated marker is real), replacing the
+  first-suggestion-only check. External YAML packs can declare
+  `gated: true` per suggestion.
+- **The fail-closed launcher-verifier family now carries stable, allowlistable
+  rule ids (#316, #304, #313).** "Embedded shell launcher cannot be statically
+  verified" and "Inline interpreter launcher cannot be statically verified"
+  denials previously reported `"rule_id": null` with `source:
+  "legacy_pattern"` — nothing to `dcg allowlist add`, nothing for
+  `[policy.rules]`. They are now `heredoc.shell:launcher-unverified` and
+  `heredoc.posix:inline-launcher-unverified`: reviewable, allowlistable
+  (an allowlist grant skips only the fail-closed launcher check — the rest of
+  the command is still evaluated on its own merits), and policy-addressable
+  like the #261 family.
+
+### Fixed
+
+- **Heredoc/launcher allowlist grants no longer override pack denials.** A
+  grant for a fail-closed heredoc-family rule (e.g.
+  `heredoc.shell:launcher-unverified`) was converted into a whole-command
+  allow at the end of evaluation even when the pack pass had denied the
+  command — an unverifiable encoded-launcher segment chained with `rm -rf /`
+  was allowed in full under the grant. Both terminal conversion sites now
+  attribute the grant only to an ALLOW outcome; pack denials and indeterminate
+  verdicts pass through untouched, so a grant skips exactly the fail-closed
+  check it names and nothing else (bd-l9jf whole-command leg).
+- **Windows installer repairs a stale `$PROFILE` hook-check (#282).** The
+  earlier #282 fix corrected the startup-check block's detection text, but the
+  installer skipped any profile already containing the marker line — which was
+  identical across versions — so pre-fix installs kept warning
+  `[dcg] Hook missing from ~/.claude/settings.json` on every new terminal no
+  matter how often dcg was reinstalled or updated. `Add-DcgProfileCheck` now
+  rewrites the managed block in place when its content is stale (line-ending
+  differences don't count as stale), and best-effort repairs the *other*
+  PowerShell host's `profile.ps1` (Windows PowerShell 5.1 vs pwsh 7) without
+  ever creating one.
+- **Unix shell startup checks self-repair too.** `install.sh` and
+  `dcg setup --shell-check` had the same marker-only idempotence trap on the
+  bash/zsh RC snippet: once the marker line existed, no re-run would ever
+  replace the block, pinning users to the first snippet version they received.
+  The Unix snippet has never changed, so nobody was bitten — this closes the
+  trap before the first time it does. Both injectors now rewrite a stale
+  managed region (marker line through the first column-0 `fi`) in place; an
+  unrecognizable boundary falls back to appending a current block.
+- **The keyword pre-filter treats `_` as a boundary, not a word character
+  (#323).** Underscore was in the pre-filter's word class, so underscore-joined
+  names never admitted a pack: `export DCG_DISABLE=1` quick-rejected past the
+  guardrails pack's own self-weakening rule, `terraform destroy
+  -target=cloudflare_record.www` past `dns.cloudflare`, and `WEBHOOK_SECRET` /
+  `SCW_SECRET_KEY` past every credential rule — the regexes were correct but
+  never ran (silent fail-open, invisible to tests written against hyphenated
+  decoys). `_` is now a boundary in the pre-filter only; pack regexes still
+  decide the verdict, so the change can only admit more commands to full
+  evaluation. Alphanumeric continuations (`dcgx`) still quick-reject.
+- **Dead-gated rules re-armed by fixing their packs' keyword lists (#323).**
+  `system.disk` gained `umount` (the `umount-force` rule was unreachable — no
+  keyword in the list occurs in `umount -f`), `database.redis` gained `valkey`
+  and `keydb` (the protocol-compatible client renames; every rule silently
+  stopped firing on those binaries), and `database.mysql` gained `mariadb` and
+  `RESET MASTER` (the renamed client, and the reset-master statement when it
+  reaches the shell without a `mysql` token).
+- **A `Bash`-labeled command that is unmistakably PowerShell now evaluates as
+  the fail-closed union of all dialects (#322).** VS Code Agent Host
+  transforms PowerShell tool calls and puts `tool_name: "Bash"` on the wire,
+  so `Remove-Item -LiteralPath .\pipelines -Recurse -Force` was evaluated
+  under the POSIX dialect — where a cmdlet is an inert unknown binary — and
+  executed. When any statement segment starts with an approved-verb
+  `Verb-Noun` cmdlet token, the hook now widens the dialect to `Unknown`,
+  which fails closed across every dialect. Explicit `powershell`/`pwsh`/`cmd`
+  labels are never second-guessed, and hyphenated POSIX commands (`apt-get`,
+  `docker-compose`, `start-stop-daemon`) do not widen.
+  **Two follow-up gaps closed (fresh-eyes review):** (1) the widening only
+  fired on `Verb-Noun` cmdlet tokens, so the PowerShell/cmd *aliases* agents
+  emit most — `rm -Recurse -Force .\pipelines`, `del /s /q C:\src`,
+  `rd /s C:\dir` — still evaluated as POSIX and failed open. The hook now also
+  widens when a segment leads with a destructive alias (`rm`/`ri`/`del`/`rd`/
+  `rmdir`/`erase`) **and** carries a Windows-shell-only argument — a
+  single-dash PowerShell parameter word (`-Recurse`/`-Force`/`-Path`/…, a
+  ≥3-char prefix that POSIX `rm` never accepts) or a cmd switch (`/s`, `/q`).
+  A plain POSIX `rm -rf ./build` has neither and keeps the Posix dialect.
+  (2) The oversized-input fail-closed path (`try_deny_oversized_input`, taken
+  when a payload exceeds `max_command_bytes`) resolved each scan window with an
+  *unrefined* dialect, so padding a mislabeled PowerShell payload past the
+  limit reopened the same hole. That path now applies the identical
+  `refine_shell_dialect` widening per window.
+- **`redirect-truncate-root-home` knows the macOS home spelling (#325).**
+  The sensitive-path alternation carried `/home` but not `/Users`, so `echo x
+  > /Users/<user>/.zshrc` — the absolute form tools actually hand agents —
+  was allowed while `> ~/.zshrc`, `> $HOME/.zshrc`, and even the *less*
+  certain `> $D/.zshrc` were blocked. `/Users` now sits in the shared
+  alternation of every rule that uses it (`redirect-truncate-root-home`,
+  `mv-sensitive-source-root-home`, `find -delete`, `unlink`, `truncate`,
+  `shred`, `tar --remove-files`, `dd of=`, and the cp/ln/rsync
+  copy-then-delete chains), matching the platform parity the `rm` rules
+  already had (#247).
+- **Write-safe character devices no longer deny as truncating redirects
+  (#324).** `> /dev/null`, `> /dev/zero`, `> /dev/full`, and `> /dev/tty`
+  are carved out of `redirect-truncate-*`: these are always character
+  devices, so opening them with `O_TRUNC` cannot destroy persistent data,
+  and each false block cost a human round-trip. `/dev/st0` (tape) and
+  `/dev/tty0`/`/dev/ttysNNN` (other terminals) stay blocked.
+  **Correction (fresh-eyes review):** the carve-out originally also covered
+  `/dev/stdout`, `/dev/stderr`, and `/dev/fd/[0-2]`, on the false premise that
+  they too are character devices. They are symlinks to whatever fd 0/1/2
+  currently point at, which may be a regular file (after `exec > logfile` or
+  an inherited redirect) — where `O_TRUNC` truncates that real file. Those
+  three are no longer carved out; the guard blocks them under its
+  zero-false-negatives posture.
+
+- **Quoted `>` bytes inside an inline interpreter payload no longer read as
+  redirect syntax when the segment carries a real redirect (#317).** `sh -c
+  "echo 'a => %s'" 2>&1` (and the `2>/dev/null` / literal `/tmp` target /
+  `python3 -c` / `node -e` variants) allowed: the `redirect-truncate-*` match
+  offset is now re-derived against the payload's own quoting, extending the
+  6f1aa5a treatment from `$`/backtick to the redirect operator. A live `>`
+  inside the payload (`bash -c "cat x > $T"`), a dynamic or sensitive target
+  outside it, and multi-segment payloads all keep the fail-closed deny.
+- **PowerShell `2>$null` is the null device, not a dynamic path (#321).**
+  Under a proven PowerShell dialect, a command whose every redirect target is
+  the read-only `$null` automatic variable (case-insensitive, `${null}`
+  included) no longer denies as `redirect-truncate-dynamic-path`. `$nullFile`,
+  `$none`, mixed targets, and POSIX/Unknown dialects — where `null` is an
+  ordinary assignable variable — stay denied.
+- **Grok Build's documented shell tool name is accepted (#319).** Grok's hooks
+  guide names the shell tool `run_terminal_command`; dcg only accepted the
+  abbreviated `run_terminal_cmd`, so the documented envelope was answered with
+  a "skip" — a silent fail-open on the exact path Grok uses. Both spellings now
+  classify as the Grok protocol and evaluate the command.
+- **`redirect-truncate-*` denials now carry redirect-specific suggestions
+  (#316/#317).** The suggestion registry previously served the recursive-rm
+  set (`ls -la` preview / `rm -ri` / move-to-trash) for redirect rules — a non
+  sequitur on a redirect denial. The rules now suggest inspecting the resolved
+  target, appending instead of truncating, redirecting to a literal temp path,
+  and backing up first. The `rm-rf-root-home` explanation also no longer
+  recommends `rm -rf /path/to/specific/directory` — a command dcg itself
+  denies — and points at the literal-temp and interactive (`rm -ri`) forms it
+  actually allows (#316).
+
+### Dependencies
+
+- Applied dependabot #315 directly: `async-trait` 0.1.92, `ast-grep-core` /
+  `ast-grep-language` 0.45.1, `rusqlite` 0.40.2 (+ `libsqlite3-sys` 0.38.2).
+
+## [v0.11.0](https://github.com/Dicklesworthstone/destructive_command_guard/releases/tag/v0.11.0) -- 2026-08-14 [Release]
+
+### Added
+
+- **macOS `diskutil` coverage in `system.disk` (#305).** `diskutil eraseDisk`,
+  `eraseVolume`, `reformat`, `zeroDisk`, `randomDisk`, and `secureErase` deny
+  as `diskutil-erase`; `partitionDisk`, `splitPartition`, `mergePartitions`,
+  and `resetFusion` as `diskutil-partition`; and `apfs
+  deleteContainer/deleteVolume/eraseVolume/deleteSnapshot` as
+  `diskutil-apfs-delete` — all Critical, all case-insensitive because diskutil
+  accepts any verb casing. Read-only verbs (`list`, `info`, `activity`,
+  `apfs list`/`listSnapshots`) stay allowed, and a read-only verb cannot mask
+  a chained destructive verb on the same line.
+- **The canonical fork bomb is blocked (#302).** `:(){ :|:& };:` and
+  word-named variants deny as `core.filesystem:fork-bomb` (Critical). The
+  regex uses backreferences to require the same identifier in all three
+  positions, so ordinary function definitions that pipe two *different*
+  commands do not match. Because the shape necessarily spans `|`, `&`, and
+  `;`, the rule joins the whole-command cross-segment pass, and the shell
+  function-definition operator `()` (pure syntax, invisible to span-based
+  keyword gating) is now a recognized quick-reject signal for the pack.
+  Differently shaped bombs (`while true; do (x) & done`) remain out of scope —
+  the regex family cannot enforce those without unbounded false positives.
+- **Proven timestamped sibling-backup `mv` is allowed (#308).** The exact
+  cross-harness installer shape — `STAMP=$(date +%Y%m%d%H%M%S);
+  BACKUP="<src>.backup-$STAMP"; mv "<src>" "$BACKUP"` — is a reversible
+  sibling rename: the destination is proven to be the source plus a
+  digits-only suffix, and the two assignments must be the segments
+  immediately before the `mv` so nothing can mutate them in between. Only
+  `mv-dynamic-path` and `mv-sensitive-source-root-home` are narrowed; any
+  deviation (a different substitution, non-sibling destination, mv options,
+  extra operands, an intervening segment, traversal, globs, unquoted
+  destination) keeps the fail-closed deny.
+
+
+- **`database.bigquery` pack — the `bq` CLI and GoogleSQL.** 11 CLI rules and
+  21 GoogleSQL rules. Three BigQuery specifics drive them, and each one makes a
+  naive port of the PostgreSQL/Snowflake packs wrong: a *dataset* is a `SCHEMA`
+  in GoogleSQL, so `DROP SCHEMA` is the dataset-level catastrophe rather than a
+  namespace tidy-up (Critical); GoogleSQL **requires** a `WHERE` clause on
+  `DELETE`/`UPDATE`, so `WHERE TRUE` is the idiomatic full-table spelling and a
+  `delete-without-where` rule modelled on PostgreSQL would never fire; and time
+  travel (2–7 days) is the only undo, so `--max_time_travel_hours` and
+  `SET OPTIONS(expiration_timestamp)` destroy the recovery path itself and are
+  destructive in their own right. BigQuery ML models get their own rule —
+  they are not covered by time travel and cost hours of training to rebuild.
+  CLI rules are scoped with `executables = ["bq"]` *and* a `bq`-anchored regex,
+  because `executables` is enforced in the evaluator rather than in
+  `Pack::check`. Opt-in like every other `database.*` pack; joins the
+  `careful_company_running_windows` preset; recommended automatically when a
+  project depends on `google-cloud-bigquery`, `@google-cloud/bigquery`,
+  `pandas-gbq`, or `sqlalchemy-bigquery`.
+
+  Evaluator wiring makes the pack *indirect*, so its unscoped GoogleSQL rules
+  cannot claim the SQL inside another client's invocation: `database.bigquery`
+  sorts first within tier 7, so without it `snow sql -q "DROP TABLE ..."` would
+  have been reported as a BigQuery rule. Regression cases pin both directions.
+
+  Implemented independently from the analysis in closed PR #295, per the
+  project's no-outside-merges policy.
+
+- **`dcg doctor --strict` (#296).** `doctor` exited `0` unconditionally, including
+  when it had just reported `"ok": false` — so `dcg doctor || handle_failure` was
+  dead code and a provisioning run got a green signal from a guard doctor itself
+  had classified as broken. `--strict` makes the exit status carry the verdict.
+  It is opt-in, matching `pack validate --strict`; the default stays `0` for
+  anyone already calling doctor in a pipeline.
+
+### Changed
+
+- **The block message no longer echoes the command twice (#299).** The command
+  appeared in both the `Tip: dcg explain "<cmd>"` line and a `Command: <cmd>`
+  line, making `len(permissionDecisionReason) = 2*len(command) + 499` exactly. A
+  hook decision lands in the agent's transcript and is replayed on every later
+  turn, so the second echo was paid for repeatedly while telling the reader
+  nothing the first did not — the agent just wrote that command. The `Tip:` copy
+  is kept because it is also actionable. No verdict changes.
+- **`platform.github` rules now carry explanations and suggestions (#300).** All
+  sixteen destructive rules were built with the 3-arg macro form, so every
+  denial rendered as "No additional explanation is available yet. See pack
+  documentation for details." Each rule now explains what is actually lost and
+  names the safer spelling — for the raw-API catch-all, that includes pointing at
+  the first-class `gh issue edit --remove-parent` / `--remove-sub-issue` verbs,
+  which dcg allows outright. A new pack test enforces this going forward.
+
+### Fixed
+
+- **`chown -R`/`chmod -R`/`setfacl -R` on bare `/` and `/home` now deny
+  (#301).** Two independent bugs in `system.permissions`: the protected-path
+  regex tail `(?:$|bin|...)\b` could never match a bare `/` (the `\b` after
+  the end-anchor has no word character to bound), and `/home` was missing
+  from the protected list entirely. `chmod-777` had masked the 777 case,
+  which is why the gap survived the obvious test. `/home` is scoped to the
+  home root or a whole single-user home (`/home`, `/home/user` — where
+  `~/.ssh` lives), so a routine `chmod -R /home/user/project` on a project
+  directory stays allowed while `chmod -R /home` (which locks out every
+  account) is blocked.
+- **`pnpm`/`npm`/`yarn` publish rules require subcommand position (#306).**
+  `pnpm run build; bun ./publish-snapshot.ts`, `pnpm run build --reporter
+  "publish"`, and `pnpm run build publish` no longer deny: `publish` must be
+  reachable through option tokens only, so argument data and later shell
+  segments are not publication. Because the pack regexes run on the sanitized
+  command — which has already stripped the quotes that distinguish
+  `pnpm --reporter "publish"` (a value) from `pnpm --reporter publish` — a
+  match is confirmed against the **original** command by a quoting-aware gate
+  (`invokes_publish_subcommand`): an unquoted `publish` in subcommand position
+  is publication, a quoted one is data. Real forms (`pnpm -r publish`,
+  `pnpm recursive publish`, `--filter <ws> publish`, `yarn workspace <ws>
+  publish`, `yarn npm publish`, `pnpm.cmd`) still deny, and an unquoted
+  option value named `publish` stays fail-closed, in every dialect. The
+  `*-dry-run` safe patterns are segment-bounded so a dry-run in one segment
+  cannot mask a later one.
+- **Single-quoted `$`/backtick/backslash in `mv` paths are literal (#307).**
+  `mv './$ROOT' /tmp/x` is data, not expansion: `mv-dynamic-path` stands
+  down only when *every* dynamic marker in the command is inside a POSIX
+  single-quoted span. One active marker anywhere — double quotes, unquoted
+  variables, a quote-manipulating backslash — keeps the deny.
+- **`dcg --robot test` honors the hook evaluation budget (#309).** Robot mode
+  is an agent-integration boundary, so it now enforces the configured
+  timeout and answers with bounded `{"decision":"indeterminate",
+  "source":"analysis_budget"}` JSON without requiring the human-facing
+  `--enforce-budget` diagnostic flag (which stays opt-in for interactive
+  `dcg test`).
+- **`pwsh --version`/`--help` and read-only `-c` variable expressions are
+  allowed (#304).** pwsh accepts exactly two GNU-style spellings, both
+  print-and-exit; they no longer land in the unknown-host-option refusal.
+  And a `-Command` payload that is exactly one variable read with property
+  accesses (`$PSVersionTable.PSVersion`, `$env:PATH`) invokes nothing, so it
+  no longer trips the runtime-expansion refusal — invoking, indexing,
+  subexpressions, or any second statement stays fail-closed. (`-File` was
+  already fixed on main; `SP=…; pwsh -c "…"` likewise.)
+- **Backing up the agent's hook config is a read, not tampering (#313).**
+  `Copy-Item ~/.claude/settings.json <backup>` no longer denies:
+  copy-family verbs moved out of `agent-hook-config-tamper` into a new
+  `agent-hook-config-overwrite` rule that fires only when the config path is
+  the *write* side (`-Destination` or positional destination). Deleting,
+  rewriting, moving, or renaming the live config still denies, as does
+  copying anything onto it.
+- **`bash -c` payloads keep their own quote context (#288 follow-up).**
+  `bash -lc 'grep -n "rm -rf /" notes.md'` was denied while the bare inner
+  command was correctly allowed: the match landed inside the inline payload,
+  whose `InlineCode` classification dropped the payload's internal quoting.
+  A core-rule match inside a POSIX-shell inline payload is now re-classified
+  against the payload itself, so it resolves exactly like the bare inner
+  command — and `bash -c 'rm -rf /'` still denies, because the payload
+  classifies it as live code.
+
+
+- **A pathological `gh` command line could fail OPEN.** The shared option-prefix
+  in `platform.github` used `\S+` for an option's value, which also matches a
+  flag token — so in `gh -a -b -c …` each token could parse either as a new
+  option or as the previous one's value, giving exponentially many parses.
+  These patterns carry a lookahead and therefore run on the backtracking
+  engine, where `CompiledRegex::is_match` maps a backtrack-limit error to
+  `false`. Adopted the unambiguous shape the database packs already use
+  (`[^-\s;&|][^\s;&|]*`).
+- **`dcg doctor`'s pretty renderer computed a wrong verdict**, which now
+  matters because `--strict` derives the exit status from it — and pretty is
+  what runs in CI, since rich output is disabled without a TTY. A failed
+  config write printed an error without counting it, and the Grok
+  "NOT REGISTERED" branch incremented `fixed` without ever incrementing
+  `issues`, corrupting the `issues == 0 || (fix && fixed == issues)`
+  arithmetic in both directions: masking a genuinely unfixed issue, and
+  reporting failure on a fully repaired machine.
+- **`doctor --fix` could buy off a problem it could not fix.** Creating the
+  default config counted a `fixed` with no matching `issues` (a missing config
+  is a *warning*, not an issue), so that one success cancelled a genuinely
+  unfixed issue through the `fixed == issues` equality: on a machine whose hook
+  was misconfigured and unwritable, `dcg doctor --fix --strict` reported "All
+  issues fixed!" and exited 0. Both renderers now count the issue each repair
+  resolves, and a test asserts `fixed <= issues`.
+- **`doctor --strict` gave different answers per `--format`.** The Grok
+  registration check existed only in the pretty renderer, so a machine with
+  Grok present and unwired exited 1 with `dcg doctor --strict` and 0 with
+  `--format json`. The check now lives in the shared report (`grok_hook`) and a
+  test pins that both renderers agree.
+- **`gh repo delete` recommended a command dcg itself blocks.** Its first
+  suggested alternative was `gh repo archive`, which the same pack denies, so
+  the agent bounced between two denials. The suggestions now lead with a
+  runnable command and say plainly that archiving is gated too. A pack test
+  asserts no rule's first suggestion is blocked by its own pack.
+- **`gh-api-delete-repo` is no longer a misnamed catch-all (#300).** The rule
+  matched *any* `gh api ... DELETE`, not repository deletion, while its name is
+  what surfaces as `rule_id` in the history DB, `dcg stats`, `dcg
+  suggest-allowlist`, and allowlist entries. The catch-all is now
+  `gh-api-delete-generic`, and `gh-api-delete-repo` matches what its name says:
+  `DELETE /repos/{owner}/{repo}`. Both are still denied, so no command changes
+  verdict. **Breaking for persisted state:** an allowlist or `[rules]` entry for
+  `platform.github:gh-api-delete-repo` now permits only repository deletion
+  rather than every raw-API DELETE — a tightening — and history rows written
+  before this release keep the old `rule_id`.
+
+- **False positives:** `pwsh -File <script.ps1>` (and its abbreviation `-f`) is
+  no longer denied as an unverifiable launcher envelope. `-File` was missing
+  from the PowerShell host-option table entirely, so it resolved to `Unknown`
+  and hit the fail-closed branch for unrecognized dash tokens — while the
+  positional `pwsh <script.ps1>` form, which is the same operation, and
+  `-Command`, which is strictly more dangerous, were both allowed. `-File` is
+  now a first-class option that ends host-option parsing (later tokens are
+  script arguments, not host options). `-File -` still refuses, because a
+  script read from stdin is no more inspectable than `-Command -`. Routing it
+  through the shared option table also means `pwsh -f -` is now recognized as
+  reading a script from stdin, which the previous exact-match `-file` check in
+  the pipeline analyzer missed.
+
+---
+
 ## [v0.10.0](https://github.com/Dicklesworthstone/destructive_command_guard/releases/tag/v0.10.0) -- 2026-08-07 [Release]
 
 A large correctness, feature, and hardening release from a full issue-triage

@@ -68,13 +68,17 @@ properties:
         explanation:
           type: string
           description: Longer explanation shown in verbose output.
-        effects:
+        executables:
           type: array
-          description: |
-            v0.6+ optional Tier-A explicit effect tags that override
-            the parent pack's `default_effects` for this rule.
+          minItems: 1
+          description: >-
+            Canonical lowercase executable basenames that scope this rule.
+            Omit the key for an unscoped rule; an empty list is invalid.
           items:
-            $ref: "#/definitions/effect"
+            type: string
+            pattern: "^[a-z0-9][a-z0-9._+-]*$"
+            not:
+              pattern: "\\.(exe|cmd|bat|com)$"
     default: []
   safe_patterns:
     type: array

@@ -47,6 +47,7 @@ use dcg_cli::pending_exceptions::{
     MaintenanceRecheck, PendingExceptionStore, PersistBudget, log_maintenance,
 };
 use dcg_cli::perf::{Deadline, HOOK_EVALUATION_BUDGET};
+use dcg_cli::update::{GIT_DESCRIBE, GIT_SHA};
 // Import HookInput for parsing stdin JSON in hook mode
 #[cfg(test)]
 use dcg_cli::hook::HookInput;
@@ -61,6 +62,9 @@ use std::time::{Duration, Instant};
 const PKG_VERSION: &str = env!("CARGO_PKG_VERSION");
 const BUILD_TIMESTAMP: Option<&str> = option_env!("VERGEN_BUILD_TIMESTAMP");
 const RUSTC_SEMVER: Option<&str> = option_env!("VERGEN_RUSTC_SEMVER");
+const RUSTC_COMMIT_HASH: Option<&str> = option_env!("VERGEN_RUSTC_COMMIT_HASH");
+const RUSTC_COMMIT_DATE: Option<&str> = option_env!("VERGEN_RUSTC_COMMIT_DATE");
+const RUSTC_HOST_TRIPLE: Option<&str> = option_env!("VERGEN_RUSTC_HOST_TRIPLE");
 const CARGO_TARGET: Option<&str> = option_env!("VERGEN_CARGO_TARGET_TRIPLE");
 
 // NOTE: HookInput, ToolInput, HookOutput, HookSpecificOutput types are now defined
@@ -226,12 +230,13 @@ fn handle_indeterminate_evaluation(
     working_dir: &str,
     stage: &str,
     deadline: &Deadline,
+    deny_unverified: bool,
 ) {
     let elapsed = deadline.elapsed();
     let budget = deadline.max_duration();
 
     let reason = format_indeterminate_reason(stage, budget);
-    hook::output_indeterminate_for_protocol(protocol, &reason);
+    hook::output_indeterminate_for_protocol(protocol, &reason, deny_unverified);
 
     if let Some(writer) = history_writer {
         let entry = build_history_entry(
@@ -396,7 +401,7 @@ fn try_deny_oversized_input(
     for id in external_store.pack_ids() {
         enabled_packs.insert(id.clone());
     }
-    remove_disabled_packs_for_agent(&mut enabled_packs, config, &effective_agent);
+    config.remove_disabled_packs_for_agent(&mut enabled_packs, &effective_agent);
 
     let mut enabled_keywords = REGISTRY.collect_enabled_keywords(&enabled_packs);
     enabled_keywords.extend(external_store.keywords().iter().copied());
@@ -427,6 +432,9 @@ fn try_deny_oversized_input(
         allowlists: &allowlists,
         heredoc_settings,
         cwd_path: cwd_path.as_deref(),
+        // Only the truncated prefix of an oversized payload is available
+        // here; its envelope fields were never parsed.
+        hook_cwd: None,
         working_dir: &working_dir,
         deadline,
         hook_protocol,
@@ -452,7 +460,13 @@ fn try_deny_oversized_input(
         if dcg_cli::packs::pack_aware_quick_reject(command, &enabled_keywords) {
             continue;
         }
-        let outcome = resolve_hook_command(&eval_context, command, shell_dialect, None);
+        // Down-trust a `Bash`-labeled dialect when this window is unmistakably
+        // PowerShell/cmd, exactly as the normal parsed path does (#322). Without
+        // this, padding a mislabeled PowerShell payload past `max_command_bytes`
+        // routed it here with an unrefined Posix dialect, where a cmdlet is an
+        // inert unknown binary — reopening the #322 hole on the oversized path.
+        let refined_dialect = hook::refine_shell_dialect(command, shell_dialect);
+        let outcome = resolve_hook_command(&eval_context, command, refined_dialect, None);
         if let ResolvedCommandOutcome::DenyFamily(resolved) = outcome {
             if matches!(resolved.mode, DecisionMode::Deny | DecisionMode::Ask) {
                 let mut history_writer = if config.history.enabled {
@@ -668,43 +682,8 @@ fn top_level_flag_requested(args: &[String], long: &str, short: &str) -> bool {
     false
 }
 
-fn remove_disabled_packs_for_agent(
-    enabled_packs: &mut HashSet<String>,
-    config: &Config,
-    agent: &Agent,
-) {
-    let profile = config.agents.profile_for_agent(agent);
-    for disabled in &profile.disabled_packs {
-        // `Config::enabled_pack_ids_for_agent` preserves the mandatory core
-        // category after profile expansion. This second pass exists so
-        // profile exclusions also apply to auto-enabled external packs; it
-        // must not undo the core invariant while doing so.
-        if disabled == "core" || disabled.starts_with("core.") {
-            continue;
-        }
-        enabled_packs.remove(disabled);
-        enabled_packs.retain(|pack| !pack.starts_with(&format!("{disabled}.")));
-    }
-}
-
-fn apply_agent_allowlist_profile(
-    config: &Config,
-    agent: &Agent,
-    mut allowlists: LayeredAllowlist,
-) -> LayeredAllowlist {
-    if config.allowlist_disabled_for_agent(agent) {
-        return LayeredAllowlist::default();
-    }
-
-    allowlists.prepend_agent_exact_commands(
-        agent.config_key(),
-        config.additional_allowlist_for_agent(agent),
-    );
-    allowlists
-}
-
 fn load_effective_allowlists_for_agent(config: &Config, agent: &Agent) -> LayeredAllowlist {
-    apply_agent_allowlist_profile(config, agent, load_default_allowlists())
+    config.apply_agent_allowlist_profile(agent, load_default_allowlists())
 }
 
 /// A hook command whose evaluation resolved to the deny family
@@ -798,11 +777,128 @@ struct HookEvalContext<'a> {
     allowlists: &'a LayeredAllowlist,
     heredoc_settings: &'a HeredocSettings,
     cwd_path: Option<&'a Path>,
+    /// Working directory reported by the harness in the hook payload (`cwd`),
+    /// when present. This is where the command will run, which can differ
+    /// from the hook process's own cwd; rebase-recovery resolution prefers
+    /// it (#331). Allow-once and history keep using `cwd_path`, the path the
+    /// matching CLI commands resolve from.
+    hook_cwd: Option<&'a Path>,
     working_dir: &'a str,
     deadline: &'a Deadline,
     hook_protocol: hook::HookProtocol,
     history_agent_type: &'a str,
     max_command_bytes: usize,
+}
+
+/// Outcome of checking a denied command against the rebase-recovery window.
+enum RecoveryAttempt {
+    /// Not a recovery rule, no signal, or the probe location could not be
+    /// attributed. The original deny stands.
+    NotApplicable,
+    /// The signal is active and nothing else on the line denies: allow. The
+    /// permit, if that was the signal, has been consumed.
+    Granted {
+        reason: dcg_cli::rebase_recovery::RecoveryReason,
+        pattern: Option<String>,
+    },
+    /// The signal is active, but re-evaluating the rest of the line found
+    /// another verdict that stands on its own. Nothing was consumed.
+    Residual(Box<dcg_cli::evaluator::EvaluationResult>),
+    /// The deadline ran out during re-evaluation.
+    Indeterminate,
+}
+
+/// Decide whether the rebase-recovery window applies to a denied command.
+///
+/// The signal is probed in the repository the command will actually run in
+/// (#331): the harness-reported `cwd` when present (else the hook process
+/// cwd), moved by any leading `cd <literal> &&` / `pushd` and a
+/// `git -C <literal>` on the matched segment. Anything dcg cannot attribute
+/// statically keeps the deny.
+///
+/// A live signal unlocks only the recovery rules, never the line. The command
+/// is re-evaluated with exactly those rules granted; a second destructive
+/// operation on the same line (`git restore -- f; git reset --hard`, or a
+/// `git restore` in another repository after a further `cd`) keeps its own
+/// verdict and the permit stays unconsumed because the command will not run.
+fn attempt_rebase_recovery(
+    ctx: &HookEvalContext<'_>,
+    command: &str,
+    shell_dialect: ShellDialect,
+    result: &dcg_cli::evaluator::EvaluationResult,
+) -> RecoveryAttempt {
+    use dcg_cli::rebase_recovery;
+
+    let Some(info) = result.pattern_info.as_ref() else {
+        return RecoveryAttempt::NotApplicable;
+    };
+    let pack = info.pack_id.as_deref();
+    let pattern = info.pattern_name.as_deref();
+    if !rebase_recovery::is_recovery_rule(pack, pattern) {
+        return RecoveryAttempt::NotApplicable;
+    }
+
+    let recovery_base = ctx
+        .hook_cwd
+        .filter(|path| path.is_absolute() && path.is_dir())
+        .or(ctx.cwd_path);
+    let Some(recovery_cwd) = recovery_base.and_then(|base| {
+        rebase_recovery::resolve_recovery_cwd(
+            base,
+            command,
+            info.matched_span.as_ref().map(|span| span.start),
+            shell_dialect,
+        )
+    }) else {
+        return RecoveryAttempt::NotApplicable;
+    };
+    let Some(reason) = rebase_recovery::should_allow_recovery(&recovery_cwd, pack, pattern) else {
+        return RecoveryAttempt::NotApplicable;
+    };
+
+    if ctx.deadline.is_exceeded() {
+        return RecoveryAttempt::Indeterminate;
+    }
+    let relaxed = rebase_recovery::relaxed_allowlist(ctx.allowlists);
+    let residual = evaluate_command_with_pack_order_deadline_at_path_in_dialect(
+        command,
+        ctx.enabled_keywords,
+        ctx.ordered_packs,
+        ctx.keyword_index,
+        ctx.compiled_overrides,
+        &relaxed,
+        ctx.heredoc_settings,
+        None,
+        ctx.cwd_path,
+        Some(ctx.deadline),
+        shell_dialect,
+    );
+    if residual.decision == EvaluationDecision::Indeterminate || residual.skipped_due_to_budget {
+        return RecoveryAttempt::Indeterminate;
+    }
+    if residual.decision == EvaluationDecision::Deny {
+        // A residual finding whose policy mode lets the line run (warn/log)
+        // still spends the permit: the recovery command executes, and a
+        // single-shot permit must not survive its own use.
+        let residual_mode =
+            dcg_cli::evaluator::resolve_effective_mode(ctx.config, command, &residual)
+                .unwrap_or(DecisionMode::Deny);
+        if !matches!(residual_mode, DecisionMode::Deny | DecisionMode::Ask)
+            && matches!(reason, rebase_recovery::RecoveryReason::ActivePermit(_))
+        {
+            rebase_recovery::consume_permit(&recovery_cwd);
+        }
+        return RecoveryAttempt::Residual(Box::new(residual));
+    }
+
+    // Consume the permit if that's why we allowed (single-shot).
+    if matches!(reason, rebase_recovery::RecoveryReason::ActivePermit(_)) {
+        rebase_recovery::consume_permit(&recovery_cwd);
+    }
+    RecoveryAttempt::Granted {
+        reason,
+        pattern: pattern.map(str::to_string),
+    }
 }
 
 /// Resolve one hook command end-to-end WITHOUT publishing a protocol
@@ -841,7 +937,7 @@ fn resolve_hook_command(
 
     // Use the shared evaluator for hook mode parity with `dcg test`.
     let eval_start = Instant::now();
-    let result = evaluate_command_with_pack_order_deadline_at_path_in_dialect(
+    let mut result = evaluate_command_with_pack_order_deadline_at_path_in_dialect(
         command,
         ctx.enabled_keywords,
         ctx.ordered_packs,
@@ -896,7 +992,7 @@ fn resolve_hook_command(
         return ResolvedCommandOutcome::Allow(allow_row);
     }
 
-    let Some(ref info) = result.pattern_info else {
+    if result.pattern_info.is_none() {
         // Fail open: structurally unexpected, but hook safety wins.
         let allow_row = history_writer.map(|_| {
             Box::new(build_history_entry(
@@ -911,13 +1007,10 @@ fn resolve_hook_command(
             ))
         });
         return ResolvedCommandOutcome::Allow(allow_row);
-    };
+    }
 
-    let pack = info.pack_id.as_deref();
-    let mode = dcg_cli::evaluator::resolve_effective_mode(ctx.config, command, &result)
+    let mut mode = dcg_cli::evaluator::resolve_effective_mode(ctx.config, command, &result)
         .unwrap_or(DecisionMode::Deny);
-
-    let pattern = info.pattern_name.as_deref();
 
     // Rebase-recovery unblock (issue #104), applied per command.
     //
@@ -929,29 +1022,22 @@ fn resolve_hook_command(
     // into an allow with a stderr note and (for the permit case) consume
     // the cookie so subsequent unrelated commands stay blocked.
     //
-    // Safety: only fires when BOTH (a) the matched pattern is on the
-    // small recovery allowlist, AND (b) a recovery signal is active.
-    // Outside this narrow window the original deny path is unchanged. The
-    // conversion leaves stdout untouched, so later batch entries are still
-    // evaluated.
+    // Safety: only fires when (a) the matched pattern is on the small
+    // recovery allowlist, (b) a recovery signal is active in the repository
+    // the command reaches, AND (c) nothing else on the command line denies
+    // on its own merits. Outside this narrow window the original deny path
+    // is unchanged. The conversion leaves stdout untouched, so later batch
+    // entries are still evaluated.
     if matches!(mode, DecisionMode::Deny) {
-        if let Some(cwd_ref) = ctx.cwd_path {
-            if let Some(reason) =
-                dcg_cli::rebase_recovery::should_allow_recovery(cwd_ref, pack, pattern)
-            {
-                // Consume the permit if that's why we allowed (single-shot).
-                if matches!(
-                    reason,
-                    dcg_cli::rebase_recovery::RecoveryReason::ActivePermit(_)
-                ) {
-                    dcg_cli::rebase_recovery::consume_permit(cwd_ref);
-                }
+        match attempt_rebase_recovery(ctx, command, shell_dialect, &result) {
+            RecoveryAttempt::NotApplicable => {}
+            RecoveryAttempt::Granted { reason, pattern } => {
                 // Inform on stderr (visible to the agent and to humans).
                 // Stays silent when stderr isn't a TTY and robot mode is on,
                 // but the message itself is always safe to emit.
                 eprintln!(
                     "[dcg] Allowing `{}` → rebase-recovery mode ({})",
-                    pattern.unwrap_or("<unknown>"),
+                    pattern.as_deref().unwrap_or("<unknown>"),
                     reason.label()
                 );
                 if let Some(writer) = history_writer {
@@ -961,16 +1047,44 @@ fn resolve_hook_command(
                         ctx.working_dir,
                         HistoryOutcome::Allow,
                         eval_duration,
-                        pack,
-                        pattern,
+                        Some("core.git"),
+                        pattern.as_deref(),
                         Some("rebase-recovery"),
                     );
                     writer.log(entry);
                 }
                 return ResolvedCommandOutcome::Allow(None);
             }
+            RecoveryAttempt::Indeterminate => {
+                return ResolvedCommandOutcome::DeadlineExhausted {
+                    command: command.to_string(),
+                    stage: "rebase_recovery_reevaluation",
+                };
+            }
+            RecoveryAttempt::Residual(residual) => {
+                // The recovery rule itself was unlockable, but another
+                // finding on the same line stands on its own. Report THAT
+                // finding: telling the user to mint a permit for a rule that
+                // is not what blocks them sends them in circles.
+                result = *residual;
+                mode = dcg_cli::evaluator::resolve_effective_mode(ctx.config, command, &result)
+                    .unwrap_or(DecisionMode::Deny);
+            }
         }
     }
+
+    let Some(ref info) = result.pattern_info else {
+        // Only reachable through a residual result, which by construction
+        // carries pattern info for its deny. Keep the conservative answer.
+        return ResolvedCommandOutcome::DenyFamily(Box::new(ResolvedDenyFamily {
+            command: command.to_string(),
+            result,
+            mode: DecisionMode::Deny,
+            eval_duration,
+        }));
+    };
+    let pack = info.pack_id.as_deref();
+    let pattern = info.pattern_name.as_deref();
 
     if mode == DecisionMode::Log {
         // Silent allow with its own audit row; never a response candidate, so
@@ -1017,7 +1131,11 @@ fn publish_decisive_response(
         ResolvedCommandOutcome::Allow(_) => return,
         ResolvedCommandOutcome::OversizedCommand { command_len } => {
             let reason = format_oversized_command_reason(command_len, ctx.max_command_bytes);
-            hook::output_indeterminate_for_protocol(ctx.hook_protocol, &reason);
+            hook::output_indeterminate_for_protocol(
+                ctx.hook_protocol,
+                &reason,
+                ctx.config.unverified_denies(),
+            );
             return;
         }
         ResolvedCommandOutcome::DeadlineExhausted { command, stage } => {
@@ -1029,6 +1147,7 @@ fn publish_decisive_response(
                 ctx.working_dir,
                 stage,
                 ctx.deadline,
+                ctx.config.unverified_denies(),
             );
             return;
         }
@@ -1246,6 +1365,21 @@ fn print_version() {
             "│".bright_black()
         );
     }
+    // Stable compiler identity lines bind reproducibility tooling to the
+    // compiler that built this binary, rather than whichever rustc happens to
+    // be installed when the binary is later measured.
+    for (label, value) in [
+        ("Rustc release", RUSTC_SEMVER),
+        ("Rustc commit", RUSTC_COMMIT_HASH),
+        ("Rustc date", RUSTC_COMMIT_DATE),
+        ("Rustc host", RUSTC_HOST_TRIPLE),
+    ] {
+        if let Some(value) = value {
+            if !value.is_empty() && value != "VERGEN_IDEMPOTENT_OUTPUT" {
+                eprintln!("{label}: {value}");
+            }
+        }
+    }
     if let Some(target) = CARGO_TARGET {
         eprintln!(
             "  {}  {} {}         {}",
@@ -1254,6 +1388,27 @@ fn print_version() {
             target.white(),
             "│".bright_black()
         );
+    }
+    // Provenance (#320): distinguishes a release-tag build from a local build
+    // ahead of the tag (`v0.11.0-7-gabc1234` / `-dirty`).
+    if let Some(describe) = GIT_DESCRIBE {
+        if !describe.is_empty() && describe != "VERGEN_IDEMPOTENT_OUTPUT" {
+            eprintln!(
+                "  {}  {} {}                {}",
+                "│".bright_black(),
+                "Commit:".bright_black(),
+                describe.white(),
+                "│".bright_black()
+            );
+        }
+    }
+    // Keep the human-friendly description above, but expose the full object id
+    // on its own stable line for provenance-sensitive tooling. This stays on
+    // stderr so stdout remains the single machine-readable semver line.
+    if let Some(sha) = GIT_SHA {
+        if !sha.is_empty() && sha != "VERGEN_IDEMPOTENT_OUTPUT" {
+            eprintln!("Git SHA: {sha}");
+        }
     }
 
     eprintln!(
@@ -1452,7 +1607,7 @@ fn main() {
     // bytes are identical either way.
     if additional_commands.is_empty() && command.len() > max_command_bytes {
         let reason = format_oversized_command_reason(command.len(), max_command_bytes);
-        hook::output_indeterminate_for_protocol(hook_protocol, &reason);
+        hook::output_indeterminate_for_protocol(hook_protocol, &reason, config.unverified_denies());
         return;
     }
 
@@ -1470,7 +1625,7 @@ fn main() {
     for id in external_store.pack_ids() {
         enabled_packs.insert(id.clone());
     }
-    remove_disabled_packs_for_agent(&mut enabled_packs, &config, &effective_agent);
+    config.remove_disabled_packs_for_agent(&mut enabled_packs, &effective_agent);
 
     let mut enabled_keywords = REGISTRY.collect_enabled_keywords(&enabled_packs);
     // Merge external pack keywords into enabled keywords for quick rejection.
@@ -1514,6 +1669,8 @@ fn main() {
         }
     }
 
+    let hook_cwd = hook_input.cwd.as_deref().map(Path::new);
+
     let eval_context = HookEvalContext {
         config: &config,
         enabled_keywords: &enabled_keywords,
@@ -1523,6 +1680,7 @@ fn main() {
         allowlists: &allowlists,
         heredoc_settings: &heredoc_settings,
         cwd_path: cwd_path.as_deref(),
+        hook_cwd,
         working_dir: &working_dir,
         deadline: &deadline,
         hook_protocol,
@@ -1601,7 +1759,8 @@ fn print_help() {
     eprintln!("  {}", "USAGE".yellow().bold());
     eprintln!("  {}", "─".repeat(50).bright_black());
     eprintln!("    Runs as a pre-execution shell hook for Claude Code, Codex CLI,");
-    eprintln!("    Gemini CLI, GitHub Copilot CLI, Cursor IDE, and Hermes Agent.");
+    eprintln!("    Gemini CLI, GitHub Copilot CLI, Cursor IDE, Hermes Agent,");
+    eprintln!("    OpenCode, and Oh My Pi (omp).");
     eprintln!("    Compatible agents, including Codex, receive protocol-specific stdout JSON.");
     eprintln!();
 
@@ -1672,6 +1831,10 @@ fn print_help() {
     eprintln!(
         "    {}   Allow a blocked command once via short code",
         "allow-once".green()
+    );
+    eprintln!(
+        "    {}    Create a new file from stdin without overwriting",
+        "create-new".green()
     );
     eprintln!(
         "    {}         Scan files for destructive commands",
@@ -2376,13 +2539,13 @@ mod tests {
 
         fn evaluate_with_agent(config: &Config, agent: &Agent, command: &str) -> EvaluationResult {
             let mut enabled_packs = config.enabled_pack_ids_for_agent(agent);
-            remove_disabled_packs_for_agent(&mut enabled_packs, config, agent);
+            config.remove_disabled_packs_for_agent(&mut enabled_packs, agent);
             let enabled_keywords = REGISTRY.collect_enabled_keywords(&enabled_packs);
             let ordered_packs = REGISTRY.expand_enabled_ordered(&enabled_packs);
             let keyword_index = REGISTRY.build_enabled_keyword_index(&ordered_packs);
             let compiled_overrides = config.overrides.compile();
             let allowlists =
-                apply_agent_allowlist_profile(config, agent, LayeredAllowlist::default());
+                config.apply_agent_allowlist_profile(agent, LayeredAllowlist::default());
 
             evaluate_command_with_pack_order_deadline_at_path(
                 command,
@@ -2410,8 +2573,7 @@ mod tests {
                 },
             );
 
-            let allowlists = apply_agent_allowlist_profile(
-                &config,
+            let allowlists = config.apply_agent_allowlist_profile(
                 &Agent::Unknown,
                 project_allowlist_for_rule("core.git:reset-hard"),
             );
@@ -2445,11 +2607,8 @@ mod tests {
                 },
             );
 
-            let allowlists = apply_agent_allowlist_profile(
-                &config,
-                &Agent::ClaudeCode,
-                LayeredAllowlist::default(),
-            );
+            let allowlists = config
+                .apply_agent_allowlist_profile(&Agent::ClaudeCode, LayeredAllowlist::default());
             let compiled_overrides = config.overrides.compile();
             let result = dcg_cli::evaluate_command(
                 "git reset --hard",

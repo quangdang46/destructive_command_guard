@@ -8,9 +8,78 @@ allowlists, and hooks.
 1. **CLI flags**
 2. **Environment variables**
 3. **Explicit config path**: `DCG_CONFIG=/path/to/config.toml`
-4. **Project config**: `.dcg.toml` at repo root
-5. **User config**: `~/.config/dcg/config.toml`
-6. **System config**: `/etc/dcg/config.toml`
+4. **User config**: `~/.config/dcg/config.toml`
+5. **System config**: `/etc/dcg/config.toml`
+
+### Repository config trust boundary
+
+The automatically discovered `.dcg.toml` at a repository root is not a normal
+precedence layer. Opening a newly cloned repository must not give that
+repository authority over the user's security policy. Automatic discovery
+therefore accepts only settings that monotonically add enforcement:
+
+- `[packs].enabled`
+- `[policy].default_mode = "deny"` and per-pack/per-rule entries equal to `"deny"`
+- `[general].fail_closed = true`
+- `[general].unverified_decision = "deny"`
+- `[heredoc].enabled = true`
+- `[heredoc].fallback_on_parse_error = false`
+- `[heredoc].fallback_on_timeout = false`
+
+Every other project setting is ignored by automatic discovery. In particular,
+a repository cannot add allow rules, disable packs, load repository-controlled
+custom pack files, inject custom regex overrides (including block regexes),
+reduce resource limits, restrict scanned languages, relax agent profiles, or
+alter global logging/history/output paths.
+
+After reviewing a repository's config, a user can deliberately give the whole
+file normal config authority for an invocation:
+
+```bash
+DCG_CONFIG=.dcg.toml dcg test "git reset --hard"
+```
+
+Because `DCG_CONFIG` is an explicit user-controlled selection, that file is
+loaded in full rather than through the enforcement-only project filter.
+
+On Unix, automatic discovery additionally requires `.dcg.toml` to be a direct
+regular file and binds the pathname to the same descriptor used for the
+bounded read. Native Windows currently ignores automatic project config until
+dcg has equivalent reparse-point-safe open and file-identity checks. A reviewed
+file remains available there through explicit `DCG_CONFIG` selection.
+
+Implicit system config is likewise accepted only on Unix, from a direct
+root-owned path whose file and ancestor directories are not group/world
+writable (`/private/etc/dcg` is used on macOS to avoid the `/etc` symlink).
+Native Windows should use user or explicitly selected config until native ACL
+validation is available.
+
+## Decision Policy
+
+Matched rules use severity defaults unless `[policy]` overrides them:
+
+```toml
+[policy]
+default_mode = "ask"
+
+[policy.packs]
+"database.snowflake" = "deny"
+
+[policy.rules]
+"core.git:push-force-long" = "warn"
+```
+
+- `deny` blocks the command.
+- `ask` requires explicit operator approval on Claude-compatible and Copilot
+  hooks. Protocols without a native review decision fail closed with their
+  normal deny/block response.
+- `warn` prints a warning but allows the command.
+- `log` allows silently while retaining configured audit logging.
+
+`ask` is opt-in and may be selected globally, per pack, or per rule. Broad
+`warn`/`log` policy cannot relax Critical rules; that still requires an
+explicit per-rule override. `DCG_POLICY_DEFAULT_MODE=ask` is the equivalent
+environment override.
 
 ## Pack Configuration
 

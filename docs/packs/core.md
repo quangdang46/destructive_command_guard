@@ -44,6 +44,7 @@ These patterns match potentially destructive commands:
 | `branch-dynamic-token` | A dynamic shell expansion in this git branch command can expand into a deletion or forced ref update. Quote the branch name or add `--` to make it a literal creation. | high |
 | `checkout-discard` | git checkout -- discards uncommitted changes permanently. Use 'git stash' first. | high |
 | `checkout-ref-discard` | git checkout <ref> -- <path> overwrites working tree. Use 'git stash' first. | high |
+| `show-redirect-overwrite-source` | git show <ref>:<path> redirected onto the same <path> overwrites the working tree file, exactly like the denied 'git checkout <ref> -- <path>'. | high |
 | `restore-worktree` | git restore discards uncommitted changes. Use 'git stash' or 'git diff' first. | high |
 | `restore-worktree-explicit` | git restore --worktree/-W discards uncommitted changes permanently. | high |
 | `reset-hard` | git reset --hard destroys uncommitted changes. Use 'git stash' first. | critical |
@@ -158,6 +159,8 @@ These patterns match safe commands that are always allowed:
 | `mv-var-tmp` | `^(?![^\|;&]*[\\$`])mv(?:\s+(?:-[a-zA-Z][a-zA-Z0-9_-]*(?:\s+[^/~$\-\s][^\s\|;&]*)?\|--[a-z\-]+(?:=\S+\|\s+[^/~$\-\s][^\s\|;&]*)?))*\s+(?:(?:/private)?/var/tmp/(?!\.\.(?:/\|\s\|$)\|[^\s]*/\.\.(?:/\|\s\|$))\S+\s+)+(?:/private)?/var/tmp/(?!\.\.(?:/\|\s\|$)\|[^\s]*/\.\.(?:/\|\s\|$))\S+\s*$` |
 | `mv-help` | `^mv\s+(?:--help\|--version)\s*$` |
 | `mv-to-trash` | `^(?![^\|;&]*[\\$`])mv(?:[ \t]+--?[a-zA-Z][a-zA-Z0-9-]*)*(?:[ \t]+(?:~/\|/home/[^/\s]+/\|/Users/[^/\s]+/\|(?:/private)?(?:/var)?/tmp/\|\./)?(?!\.\.(?:/\|\s\|$)\|[^\s]*/\.\.(?:/\|\s\|$))[A-Za-z0-9._][^\s;\|&]*)+[ \t]+(?:~/\.local/share/Trash\|~/\.Trash)(?:/(?!\.\.(?:/\|\s\|$)\|[^\s]*/\.\.(?:/\|\s\|$))[^\s;\|&]*)?\s*$` |
+| `mv-to-trash-quoted` | `^(?![^\|;&]*[\\$`])mv(?:[ \t]+--?[a-zA-Z][a-zA-Z0-9-]*)*(?:[ \t]+(?:(?:~/\|/home/[^/\s'"]+/\|/Users/[^/\s'"]+/\|(?:/private)?(?:/var)?/tmp/\|\./)?(?!\.\.(?:/\|\s\|$)\|[^\s]*/\.\.(?:/\|\s\|$))[A-Za-z0-9._][^\s;\|&]*\|"(?:~/\|/home/[^/"]+/\|/Users/[^/"]+/\|(?:/private)?(?:/var)?/tmp/\|\./)?(?!\.\.(?:/\|")\|[^"]*/\.\.(?:/\|"))[A-Za-z0-9._][^"$`;\|&]*"\|'(?:~/\|/home/[^/']+/\|/Users/[^/']+/\|(?:/private)?(?:/var)?/tmp/\|\./)?(?!\.\.(?:/\|')\|[^']*/\.\.(?:/\|'))[A-Za-z0-9._][^'$`;\|&]*'))+[ \t]+(?:(?:~\|/home/[^/\s'"]+\|/Users/[^/\s'"]+)(?:/\.local/share/Trash\|/\.Trash)(?:/(?!\.\.(?:/\|\s\|$)\|[^\s]*/\.\.(?:/\|\s\|$))[^\s;\|&"']*)?\|"(?:~\|/home/[^/\s'"]+\|/Users/[^/\s'"]+)(?:/\.local/share/Trash\|/\.Trash)(?:/(?!\.\.(?:/\|\s\|$)\|[^\s]*/\.\.(?:/\|\s\|$))[^\s;\|&"']*)?"\|'(?:~\|/home/[^/\s'"]+\|/Users/[^/\s'"]+)(?:/\.local/share/Trash\|/\.Trash)(?:/(?!\.\.(?:/\|\s\|$)\|[^\s]*/\.\.(?:/\|\s\|$))[^\s;\|&"']*)?')[ \t]*$` |
+| `mv-within-home` | `^(?![^\|;&]*[\\$`])mv(?:[ \t]+--?[a-zA-Z][a-zA-Z0-9-]*)*(?:[ \t]+(?:(?:~\|/home/[^/\s'"]+\|/Users/[^/\s'"]+)/(?!\.)[^/\s'"$`;\|&]+(?:/(?!\.\.(?:/\|\s\|$))[^/\s'"$`;\|&]+)+/?\|"(?:~\|/home/[^/"]+\|/Users/[^/"]+)/(?!\.)[^/"$`;\|&]+(?:/(?!\.\.(?:/\|"))[^/"$`;\|&]+)+/?"\|'(?:~\|/home/[^/']+\|/Users/[^/']+)/(?!\.)[^/'$`;\|&]+(?:/(?!\.\.(?:/\|'))[^/'$`;\|&]+)+/?'))+[ \t]+(?:(?:~\|/home/[^/\s'"]+\|/Users/[^/\s'"]+)/(?!\.)[^/\s'"$`;\|&]+(?:/(?!\.\.(?:/\|\s\|$))[^/\s'"$`;\|&]+)*/?\|"(?:~\|/home/[^/"]+\|/Users/[^/"]+)/(?!\.)[^/"$`;\|&]+(?:/(?!\.\.(?:/\|"))[^/"$`;\|&]+)*/?"\|'(?:~\|/home/[^/']+\|/Users/[^/']+)/(?!\.)[^/'$`;\|&]+(?:/(?!\.\.(?:/\|'))[^/'$`;\|&]+)*/?')[ \t]*$` |
 
 ### Destructive Patterns (Blocked)
 
@@ -190,8 +193,9 @@ These patterns match potentially destructive commands:
 | `dd-overwrite-general` | dd with of=<file> overwrites file contents and requires human approval. | high |
 | `mv-sensitive-source-root-home` | mv touching a sensitive system or home path is the cross-segment recursive-force-delete bypass. EXTREMELY DANGEROUS. | critical |
 | `mv-dynamic-path` | mv with a shell-expanded or escaped path cannot be verified before execution. | high |
-| `redirect-truncate-root-home` | shell truncating redirect (including arbitrary numeric, named, and PowerShell all-stream forms) to a sensitive system or home path destroys the previous file contents. EXTREMELY DANGEROUS. | critical |
+| `redirect-truncate-root-home` | shell truncating redirect (including arbitrary numeric, named, and PowerShell all-stream forms) to an existing sensitive system or home path destroys the previous file contents. A currently absent literal target inside an existing home-directory VCS worktree is allowed; dynamic paths, symlinks, missing parents, system paths, and .git internals stay blocked. | critical |
 | `redirect-truncate-dynamic-path` | shell redirect to a dynamic or escaped path may truncate a sensitive file and requires human approval. | high |
+| `fork-bomb` | This is a fork bomb: it recursively spawns processes until the system is unusable. | critical |
 
 ### Allowlist Guidance
 

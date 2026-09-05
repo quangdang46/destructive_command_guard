@@ -139,14 +139,9 @@ impl fmt::Debug for HookOutcome {
 // Binary discovery
 // ---------------------------------------------------------------------------
 
-/// Path to the dcg binary (same workspace-relative discovery as
-/// tests/agent_hook_output.rs).
+/// Path to the exact dcg binary Cargo built for this integration test.
 fn dcg_binary() -> PathBuf {
-    let mut path = std::env::current_exe().unwrap();
-    path.pop(); // test binary name
-    path.pop(); // deps/
-    path.push(format!("dcg{}", std::env::consts::EXE_SUFFIX));
-    path
+    PathBuf::from(env!("CARGO_BIN_EXE_dcg"))
 }
 
 // ---------------------------------------------------------------------------
@@ -1646,8 +1641,8 @@ fn cross_protocol_allow_structural_parity() {
     // Both exit 0 with empty stdout
     assert_eq!(codex.exit_code, 0);
     assert_eq!(claude.exit_code, 0);
-    assert!(codex.stdout.is_empty());
-    assert!(claude.stdout.is_empty());
+    assert_eq!(codex.stdout, [] as [u8; 0]);
+    assert_eq!(claude.stdout, [] as [u8; 0]);
 }
 
 // ===========================================================================
@@ -2006,8 +2001,8 @@ fn failopen_same_behavior_both_protocols() {
         claude_outcome.exit_code, 0,
         "Claude-style missing command must fail-open\n{claude_outcome}"
     );
-    assert!(codex_outcome.stdout.is_empty());
-    assert!(claude_outcome.stdout.is_empty());
+    assert_eq!(codex_outcome.stdout, [] as [u8; 0]);
+    assert_eq!(claude_outcome.stdout, [] as [u8; 0]);
 }
 
 // ===========================================================================
@@ -2144,31 +2139,43 @@ fn disable_core_filesystem_still_blocks_git_claude() {
 
 /// Extract the allow-once short_code from the pending_exceptions.jsonl
 /// in the hermetic HOME directory.
+/// Where these tests pin the pending-exception store.
+///
+/// `src/pending_exceptions.rs` prefers `$HOME/.config/dcg/` only when that
+/// directory ALREADY exists, and otherwise falls back to `dirs::config_dir()`
+/// — `~/.config` on Linux but `~/Library/Application Support` on macOS. These
+/// tests use a fresh tempdir HOME where `.config/dcg` does not pre-exist, so
+/// without pinning the store lands where the assertions do not look: the tests
+/// passed on CI (ubuntu) and failed on macOS. Pin the path explicitly rather
+/// than teaching the helper to search both locations, which would let a real
+/// misconfiguration pass unnoticed.
+fn pending_exceptions_path(home: &std::path::Path) -> std::path::PathBuf {
+    home.join(".config/dcg/pending_exceptions.jsonl")
+}
+
+/// Companion store for redeemed allow-once entries; same rationale.
+fn allow_once_path(home: &std::path::Path) -> std::path::PathBuf {
+    home.join(".config/dcg/allow_once.jsonl")
+}
+
+/// Apply both store overrides to a spawned dcg invocation.
+fn pin_exception_stores(cmd: &mut Command, home: &std::path::Path) {
+    cmd.env("DCG_PENDING_EXCEPTIONS_PATH", pending_exceptions_path(home))
+        .env("DCG_ALLOW_ONCE_PATH", allow_once_path(home));
+}
+
 fn extract_allow_once_code_from_pending_store(home: &std::path::Path) -> Option<String> {
-    // The store resolves through the same platform rules the spawned binary
-    // applies with HOME pointed at `home`: XDG-style ~/.config/dcg on Linux,
-    // platform-native config dir on macOS (~/Library/Application Support/dcg).
-    // The candidates must be derived from the hermetic `home` itself — the
-    // test process's own `dirs::config_dir()` reads the REAL user HOME and
-    // would surface a stale code from a previous run.
-    let candidates = vec![
-        home.join(".config/dcg/pending_exceptions.jsonl"),
-        home.join("Library/Application Support/dcg/pending_exceptions.jsonl"),
-    ];
-    for pending_path in candidates {
-        let Ok(content) = std::fs::read_to_string(&pending_path) else {
+    let pending_path = pending_exceptions_path(home);
+    let content = std::fs::read_to_string(&pending_path).ok()?;
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() {
             continue;
-        };
-        for line in content.lines() {
-            let line = line.trim();
-            if line.is_empty() {
-                continue;
-            }
-            if let Ok(val) = serde_json::from_str::<serde_json::Value>(line) {
-                if let Some(code) = val["short_code"].as_str() {
-                    if code.len() >= 5 {
-                        return Some(code.to_string());
-                    }
+        }
+        if let Ok(val) = serde_json::from_str::<serde_json::Value>(line) {
+            if let Some(code) = val["short_code"].as_str() {
+                if code.len() >= 5 {
+                    return Some(code.to_string());
                 }
             }
         }
@@ -2197,6 +2204,7 @@ fn codex_deny_creates_pending_exception_with_code() {
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    pin_exception_stores(&mut cmd, &home_path);
 
     let mut child = cmd.spawn().expect("spawn");
     {
@@ -2247,6 +2255,7 @@ fn codex_allow_once_round_trip() {
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    pin_exception_stores(&mut cmd, &home_path);
 
     let mut child = cmd.spawn().expect("spawn deny");
     {
@@ -2272,7 +2281,8 @@ fn codex_allow_once_round_trip() {
         .unwrap_or_else(|| panic!("pending store must contain short_code\n{deny_outcome}"));
 
     // Step 2: Redeem the allow-once code
-    let redeem_output = Command::new(dcg_binary())
+    let mut redeem_cmd = Command::new(dcg_binary());
+    redeem_cmd
         .arg("allow-once")
         .arg(&allow_code)
         .arg("--yes")
@@ -2283,7 +2293,9 @@ fn codex_allow_once_round_trip() {
         .env("TMPDIR", home_path.join("tmp"))
         .env("TEMP", home_path.join("tmp"))
         .env("TMP", home_path.join("tmp"))
-        .env("NO_COLOR", "1")
+        .env("NO_COLOR", "1");
+    pin_exception_stores(&mut redeem_cmd, &home_path);
+    let redeem_output = redeem_cmd
         .output()
         .expect("failed to run allow-once redeem");
 
@@ -2310,6 +2322,7 @@ fn codex_allow_once_round_trip() {
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
+    pin_exception_stores(&mut cmd, &home_path);
 
     let mut child = cmd.spawn().expect("spawn retry");
     {
@@ -2606,8 +2619,7 @@ fn codex_deny_with_history_disabled_still_emits_json() {
     );
     assert!(
         serde_json::from_slice::<serde_json::Value>(&output.stdout)
-            .ok()
-            .is_some_and(|json| json["hookSpecificOutput"]["permissionDecision"] == "deny"),
+            .is_ok_and(|json| json["hookSpecificOutput"]["permissionDecision"] == "deny"),
         "Codex deny must produce minimal JSON with history disabled"
     );
     assert!(
@@ -2678,8 +2690,7 @@ fn codex_rapid_fire_denies_all_persist_to_history() {
         );
         assert!(
             serde_json::from_slice::<serde_json::Value>(&output.stdout)
-                .ok()
-                .is_some_and(|json| { json["hookSpecificOutput"]["permissionDecision"] == "deny" }),
+                .is_ok_and(|json| { json["hookSpecificOutput"]["permissionDecision"] == "deny" }),
             "Codex deny must emit minimal JSON for '{cmd}'"
         );
     }
@@ -2758,8 +2769,7 @@ fn codex_deny_history_write_protected_dir_no_panic() {
     );
     assert!(
         serde_json::from_slice::<serde_json::Value>(&output.stdout)
-            .ok()
-            .is_some_and(|json| json["hookSpecificOutput"]["permissionDecision"] == "deny"),
+            .is_ok_and(|json| json["hookSpecificOutput"]["permissionDecision"] == "deny"),
         "Codex deny JSON must survive history DB failure"
     );
     assert!(

@@ -697,6 +697,60 @@ fn symbolic_branch_option_may_mutate(word: &SymbolicPosixWord) -> bool {
         .any(|candidate| word.may_equal(candidate))
 }
 
+/// Whether the literal words of a symbolic argv tail prove a branch
+/// delete/force mutation. Used when unknown expansions occupy the executable
+/// and subcommand slots (#281): the unknowns supply no Git evidence, but a
+/// literal `-D` / `--delete` / `--force` after them still names a destructive
+/// branch operation in plain sight, so it must not be discarded (#283-review).
+fn literal_argv_proves_branch_mutation(words: &[SymbolicPosixWord]) -> bool {
+    literal_branch_tokens_prove_mutation(words.iter().map(SymbolicPosixWord::exact))
+}
+
+/// Shared literal-evidence scan behind [`literal_argv_proves_branch_mutation`]
+/// and its `GitSemanticWord` counterpart. `None` marks a dynamic word, which
+/// contributes no evidence but does not stop the scan.
+fn literal_branch_tokens_prove_mutation<'a>(tokens: impl Iterator<Item = Option<&'a str>>) -> bool {
+    let mut mutation = BranchMutationState::default();
+    for token in tokens {
+        let Some(token) = token else {
+            continue;
+        };
+        if matches!(token, "--" | "--end-of-options") {
+            break;
+        }
+        if token.starts_with("--") {
+            let Some(resolved) = resolve_branch_long_option(token) else {
+                continue;
+            };
+            if resolved.inline_value && matches!(resolved.arity, BranchLongOptionArity::None) {
+                continue;
+            }
+            match resolved.name {
+                "delete" if resolved.negated => mutation.delete_bits &= !1,
+                "delete" => mutation.delete_bits |= 1,
+                "force" => mutation.force = !resolved.negated,
+                _ => {}
+            }
+            continue;
+        }
+        if let Some(flags) = token.strip_prefix('-').filter(|flags| !flags.is_empty()) {
+            for flag in flags.chars() {
+                match flag {
+                    'd' => mutation.delete_bits |= 1,
+                    'D' => mutation.delete_bits |= 2,
+                    'f' => mutation.force = true,
+                    'M' | 'C' => mutation.forced_move_or_copy = true,
+                    // `-u<upstream>` and `-t<start>` consume their attached
+                    // remainder as data, not as further short flags.
+                    'u' | 't' => break,
+                    _ => {}
+                }
+            }
+        }
+    }
+    matches!(mutation.decision(), BranchCommandDecision::Destructive)
+}
+
 fn sole_posix_branch_name_query(command: &str) -> bool {
     let command = command.trim();
     let body = if let Some(body) = command
@@ -1252,7 +1306,6 @@ fn git_token_expansion_may_split(raw: &str, dialect: ShellDialect) -> bool {
                     _ => {}
                 }
             }
-            false
         }
         // Native-command expansion can produce more than one argv element in
         // both PowerShell (arrays) and Cmd (expanded whitespace). Expansion
@@ -1278,9 +1331,9 @@ fn git_token_expansion_may_split(raw: &str, dialect: ShellDialect) -> bool {
                     _ => {}
                 }
             }
-            false
         }
     }
+    false
 }
 
 fn git_dynamic_fragments(decoded: &str, dialect: ShellDialect) -> Vec<String> {
@@ -1462,23 +1515,51 @@ fn git_semantic_word_is_unbounded(word: &GitSemanticWord, dialect: ShellDialect)
             .all(String::is_empty)
 }
 
-fn git_semantic_executable_may_equal(
+/// Reduce an executable word to the view that actually names the program: the
+/// basename after the final path separator, with `dynamic` re-derived from the
+/// basename's own fragments rather than inherited from the full word.
+///
+/// The program name is the basename, so every question a `core.git` gate asks
+/// about the executable ("could this be `git`?", "does this carry any literal
+/// evidence?") must be answered against the basename alone. Carrying the whole
+/// word's `dynamic` flag over gets both directions wrong (#360, #361):
+/// a glob in a *directory* component (`/usr/*/git`) left a fully literal `git`
+/// basename flagged dynamic, and a glob *basename* (`/*`) borrowed the literal
+/// `/` separator as the evidence a pure expansion is defined not to have.
+fn git_semantic_executable_basename(
     word: &GitSemanticWord,
     dialect: ShellDialect,
-    candidate: &str,
-) -> bool {
+) -> GitSemanticWord {
     let decoded = if dialect == ShellDialect::Cmd {
         word.decoded.trim_start_matches('@')
     } else {
         &word.decoded
     };
     let basename = decoded.rsplit(['/', '\\']).next().unwrap_or(decoded);
-    let word = GitSemanticWord {
+    // A basename that splits into a single fragment is wholly literal text;
+    // only an expansion *inside the basename itself* keeps the word dynamic.
+    let basename_dynamic = word.dynamic && git_dynamic_fragments(basename, dialect).len() > 1;
+    GitSemanticWord {
         decoded: basename.to_string(),
-        dynamic: word.dynamic,
+        dynamic: basename_dynamic,
         may_split: word.may_split,
-    };
+    }
+}
+
+fn git_semantic_executable_may_equal(
+    word: &GitSemanticWord,
+    dialect: ShellDialect,
+    candidate: &str,
+) -> bool {
+    let word = git_semantic_executable_basename(word, dialect);
     git_symbolic_word_may_equal(&word, dialect, candidate, true)
+}
+
+/// [`git_semantic_word_is_unbounded`], judged on the executable-name view. The
+/// path separator says nothing about which program the basename resolves to,
+/// so `/*` supplies exactly as little Git evidence as a bare `*` (#360).
+fn git_semantic_executable_is_unbounded(word: &GitSemanticWord, dialect: ShellDialect) -> bool {
+    git_semantic_word_is_unbounded(&git_semantic_executable_basename(word, dialect), dialect)
 }
 
 fn decode_git_semantic_words(command: &str, dialect: ShellDialect) -> Option<DecodedGitWords> {
@@ -3509,7 +3590,7 @@ fn dynamic_git_branch_may_mutate(command: &str, dialect: ShellDialect) -> bool {
     // two unknowns are not evidence. Literal branch syntax after it (e.g.
     // `$(producer) branch -d feature`) still fails closed below.
     let executable_unbounded =
-        !powershell_expression && git_semantic_word_is_unbounded(executable, dialect);
+        !powershell_expression && git_semantic_executable_is_unbounded(executable, dialect);
     let dashed_branch = !powershell_expression
         && !executable_unbounded
         && (git_semantic_executable_may_equal(executable, dialect, "git-branch")
@@ -3525,6 +3606,23 @@ fn dynamic_git_branch_may_mutate(command: &str, dialect: ShellDialect) -> bool {
     index += 1;
     if dashed_branch {
         return semantic_branch_argv_may_mutate(&words[index..], dialect);
+    }
+
+    // When the executable name proved nothing (#360, #361: a pure-wildcard
+    // basename, or a bare expansion), no later word may stand in for the
+    // literal `branch` subcommand — but literal deletion/force flags anywhere
+    // in the remaining argv are still evidence in plain sight. Scanning the
+    // whole tail here (not just the words after a dynamic token) keeps
+    // `/* -D main` denied even though its flag sits in the very first argv
+    // slot, where no dynamic word precedes it.
+    if executable_unbounded
+        && literal_branch_tokens_prove_mutation(
+            words[index..]
+                .iter()
+                .map(|word| (!word.dynamic).then_some(word.decoded.as_str())),
+        )
+    {
+        return true;
     }
 
     loop {
@@ -3624,7 +3722,15 @@ fn dynamic_git_branch_may_mutate(command: &str, dialect: ShellDialect) -> bool {
             index += 1;
             continue;
         }
-        // An unresolved command may be a persistent alias for `branch`.
+        // An unresolved command may be a persistent alias for `branch` — but
+        // only when the executable itself gave some evidence of being Git.
+        // With an unbounded executable this token is a second unknown, and
+        // two unknowns are not evidence (#360, per the #281 precedent). Any
+        // literal deletion flag in the tail was already caught by the
+        // whole-argv scan above, so returning false here hides nothing.
+        if executable_unbounded {
+            return false;
+        }
         return semantic_branch_argv_may_mutate(&words[index + 1..], dialect);
     }
 }
@@ -3813,7 +3919,23 @@ fn symbolic_posix_branch_decision(command: &str) -> Option<BranchCommandDecision
                 return Some(BranchCommandDecision::NotBranch);
             };
             if word.is_dynamic() {
-                if !executable_unbounded && word.may_equal("branch") {
+                if executable_unbounded {
+                    // #281: two unknowns are not evidence — a dynamic word
+                    // cannot stand in for `branch` when the executable is
+                    // itself an unbounded expansion. Literal argv after the
+                    // unknowns is evidence, though: `$g $sub -D main` still
+                    // carries a proven branch deletion in plain sight, so the
+                    // scan continues past the dynamic word rather than
+                    // discarding what follows it.
+                    return Some(
+                        if literal_argv_proves_branch_mutation(&words[index + 1..]) {
+                            BranchCommandDecision::DestructiveDynamic
+                        } else {
+                            BranchCommandDecision::NotBranch
+                        },
+                    );
+                }
+                if word.may_equal("branch") {
                     if word.unquoted_dynamic {
                         return Some(BranchCommandDecision::DestructiveDynamic);
                     }
@@ -4811,20 +4933,28 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
                  expanded and field-split by the shell before git parses it, so its output can \
                  inject `-D`, `-f`, `-M`, or `-C` and turn a branch creation into a deletion or \
                  forced ref update. dcg cannot statically bound the expansion's output.\n\n\
-                 Safe spellings dcg allows without any exception:\n\
+                 The reliable fix is to resolve the dynamic value first and rerun the command \
+                 with the literal branch name.\n\n\
+                 For a branch *creation*, these spellings are safe without any exception:\n\
                  - Quote the name so it stays one word: git branch \"backup-$(date +%s)\"\n\
                  - End option parsing first: git branch -- backup-$(date +%s)\n\n\
-                 Both guarantee the expansion cannot become a flag.",
+                 Both guarantee the expansion cannot become a flag. They do not unlock a command \
+                 that already carries a literal deletion/force flag (`-D`, `-d`, `-f`, `-M`, \
+                 `-C`) — branch deletion stays gated on its own merits.",
             ),
             suggestions: &const {
                 [
                     PatternSuggestion::new(
+                        "Resolve the dynamic value first, then rerun with the literal branch name",
+                        "The expansion is the problem; a literal name is evaluated on its own merits",
+                    ),
+                    PatternSuggestion::new(
                         "git branch \"{name}\"",
-                        "Quote the branch name so the expansion stays a single non-flag word",
+                        "For a creation: quote the branch name so the expansion stays a single non-flag word",
                     ),
                     PatternSuggestion::new(
                         "git branch -- {name}",
-                        "`--` ends option parsing, so expanded output cannot become a flag",
+                        "For a creation: `--` ends option parsing, so expanded output cannot become a flag",
                     ),
                 ]
             },
@@ -4844,8 +4974,9 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
              - git diff <path>: Review what would be lost before discarding\n\n\
              Preview changes first:\n  git diff -- <path>\n\n\
              Recovering from a failed `git pull --rebase`?\n\
-             Run `dcg rebase-recover` in this repo, then retry the command. This issues a \
-             short-lived, single-shot permit that unblocks this rule only. A rebase already \
+             Run `dcg rebase-recover` in this repo, then retry the command on its own line \
+             (a leading `cd <repo> &&` is fine; nothing else may share the line). This \
+             issues a short-lived, single-shot permit that unblocks this rule only. A rebase already \
              in progress (`.git/rebase-merge/` or `.git/rebase-apply/` present) auto-allows \
              the same rule without a permit.",
             &const {
@@ -4871,7 +5002,10 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
              lost - they cannot be recovered.\n\n\
              Safer alternatives:\n\
              - git stash: Save changes first, then checkout, then restore with 'git stash pop'\n\
-             - git show <ref>:<path>: View the file content without overwriting\n\n\
+             - git show <ref>:<path>: View the file content without overwriting. View only — \
+             redirecting the output back onto <path> (`git show <ref>:<path> > <path>`) reaches \
+             the exact overwrite this rule denies. To capture the content, redirect to a NEW \
+             file: `git show <ref>:<path> > <path>.from-ref`\n\n\
              Preview what would change:\n  git diff HEAD <ref> -- <path>",
             &const {
                 [
@@ -4881,7 +5015,52 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
                     ),
                     PatternSuggestion::new(
                         "git show {ref}:{path}",
-                        "View the file content without overwriting",
+                        "View the file content without overwriting (view only — do not redirect back onto the same path)",
+                    ),
+                    PatternSuggestion::new(
+                        "git diff HEAD {ref} -- {path}",
+                        "Preview what would change before overwriting",
+                    ),
+                ]
+            }
+        ),
+        // `git show <ref>:<path>` is safe on its own (stdout only), and the
+        // checkout-ref-discard remediation above recommends it. But redirected
+        // back onto the SAME path it reaches the identical end state that rule
+        // denies: the working-tree file is overwritten with another commit's
+        // content and uncommitted changes to it are lost (#373). Deny only the
+        // same-path shape (a backreference pins redirect target == shown
+        // path), so `git show HEAD:f > f.from-ref` and every other capture to
+        // a new file stays allowed. Covers `>`, `>>`, and `>|`; the piped
+        // `| tee <path>` spelling cannot be a core.git pattern (this pack is
+        // matched per pipeline segment by design), so the prose warns about
+        // it instead.
+        destructive_pattern!(
+            "show-redirect-overwrite-source",
+            r"(?:^|[^[:alnum:]_-])git\s+(?:\S+\s+)*show\s+[^\s:]+:(\S+)\s*(?:>>|>\|?)\s*(?:\./)?\1(?:[\s;&|)]|$)",
+            "git show <ref>:<path> redirected onto the same <path> overwrites the working tree file, exactly like the denied 'git checkout <ref> -- <path>'.",
+            High,
+            "Redirecting `git show <ref>:<path>` back onto `<path>` replaces the working-tree \
+             file with the version from another commit or branch. Any uncommitted changes to \
+             that file are permanently lost — the same hazard `checkout-ref-discard` exists to \
+             prevent, reached through a redirect instead of a checkout.\n\n\
+             The piped spelling `git show <ref>:<path> | tee <path>` reaches the same \
+             overwrite and is just as unsafe.\n\n\
+             Safer alternatives:\n\
+             - Redirect to a NEW file, then inspect: `git show <ref>:<path> > <path>.from-ref`\n\
+             - git stash: Save changes first, then take the other version, then \
+             'git stash pop'\n\
+             - Bare `git show <ref>:<path>` (no redirect) only prints and is always allowed.\n\n\
+             Preview what would change:\n  git diff HEAD <ref> -- <path>",
+            &const {
+                [
+                    PatternSuggestion::new(
+                        "git show {ref}:{path} > {path}.from-ref",
+                        "Capture the other version into a NEW file instead of overwriting the working copy",
+                    ),
+                    PatternSuggestion::new(
+                        "git stash",
+                        "Save changes first, then take the other version, then 'git stash pop'",
                     ),
                     PatternSuggestion::new(
                         "git diff HEAD {ref} -- {path}",
@@ -4909,8 +5088,9 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
              - git diff <path>: Review what would be lost\n\n\
              Preview changes first:\n  git diff <path>\n\n\
              Recovering from a failed `git pull --rebase`?\n\
-             Run `dcg rebase-recover` in this repo, then retry the command. This issues a \
-             short-lived, single-shot permit that unblocks this rule only. A rebase already \
+             Run `dcg rebase-recover` in this repo, then retry the command on its own line \
+             (a leading `cd <repo> &&` is fine; nothing else may share the line). This \
+             issues a short-lived, single-shot permit that unblocks this rule only. A rebase already \
              in progress (`.git/rebase-merge/` or `.git/rebase-apply/` present) auto-allows \
              the same rule without a permit.",
             &const {
@@ -4991,9 +5171,9 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
                         "git reset --mixed HEAD~1",
                         "Undo commit, unstage changes, but keep working directory",
                     ),
-                    PatternSuggestion::new(
+                    PatternSuggestion::gated(
                         "git checkout -- {file}",
-                        "Reset a specific file only, preserving other changes",
+                        "Discards changes in one file only — still destructive, so dcg gates it too",
                     ),
                 ]
             }
@@ -5264,9 +5444,9 @@ fn create_destructive_patterns() -> Vec<DestructivePattern> {
                git fsck --unreachable | grep commit",
             &const {
                 [
-                    PatternSuggestion::new(
+                    PatternSuggestion::gated(
                         "git stash drop stash@{n}",
-                        "Remove one specific stash at a time",
+                        "Drops one stash at a time instead of all — still deletes stashed work, so dcg gates it too",
                     ),
                     PatternSuggestion::new("git stash list", "Review all stashes before clearing"),
                     PatternSuggestion::new(
@@ -5428,6 +5608,129 @@ mod tests {
                     branch_command_decision_in_dialect(command, dialect),
                     BranchCommandDecision::DestructiveDynamic,
                     "literal branch evidence must stay denied: {command} ({dialect:?})"
+                );
+            }
+        }
+    }
+
+    // =========================================================================
+    // Executable evidence is judged on the basename (#360, #361)
+    // =========================================================================
+
+    /// A word whose basename is nothing but glob metacharacters names no
+    /// program at all — the leading `/` is a directory separator, not literal
+    /// Git evidence — so it must supply exactly as little evidence as the bare
+    /// `*`/`$cmd` that #281 already discounts. The reported symptom: a C/JSDoc
+    /// block comment (`/* ... */`) reaching a shell was denied as a
+    /// destructive dynamic git-branch invocation (#360).
+    #[test]
+    fn wildcard_basename_executable_supplies_no_git_evidence_360() {
+        for command in [
+            // Minimal reproducer and the block-comment pair.
+            "/* *",
+            "/* */",
+            "/** Default language for new articles */",
+            // Other pure-metacharacter basenames.
+            "/? *",
+            "./* *",
+            "lib/* *",
+            "/[ab]* *",
+            // A second wildcard cannot stand in for the `branch` subcommand.
+            "/* b*",
+            // An expansion basename behind a literal directory is just as
+            // unbounded as the bare expansion.
+            "dir/$X $sub",
+        ] {
+            for dialect in [ShellDialect::Unknown, ShellDialect::Posix] {
+                let decision = branch_command_decision_in_dialect(command, dialect);
+                assert!(
+                    !matches!(
+                        decision,
+                        BranchCommandDecision::Destructive
+                            | BranchCommandDecision::DestructiveDynamic
+                    ),
+                    "wildcard basename is no git evidence: {command} ({dialect:?}) -> {decision:?}"
+                );
+            }
+        }
+    }
+
+    /// The full reported command: a `python3` heredoc rewriting source files
+    /// whose body contains a JSDoc comment. Neither `git` nor `branch` appears
+    /// anywhere; the `/**` line manufactured the old match (#360).
+    #[test]
+    fn python_heredoc_with_jsdoc_body_is_not_a_branch_command_360() {
+        let command = concat!(
+            "cd /tmp/proj && python3 - <<'PY'\n",
+            "pairs = [\n",
+            "    ('src/settings.ts', '/** Default language for new articles */', '/** Default locale */'),\n",
+            "]\n",
+            "for path, old, new in pairs:\n",
+            "    text = open(path).read()\n",
+            "    open(path, 'w').write(text.replace(old, new))\n",
+            "PY",
+        );
+        for dialect in [ShellDialect::Unknown, ShellDialect::Posix] {
+            let decision = branch_command_decision_in_dialect(command, dialect);
+            assert!(
+                !matches!(
+                    decision,
+                    BranchCommandDecision::Destructive | BranchCommandDecision::DestructiveDynamic
+                ),
+                "python heredoc body is not a git branch command: ({dialect:?}) -> {decision:?}"
+            );
+        }
+    }
+
+    /// The mirror defect (#361): a glob in a *directory* component leaves a
+    /// fully literal `git` basename, which names Git unambiguously. Treating
+    /// the whole word's dynamism as the basename's let
+    /// `/usr/*/git branch -D main` slip past the entire `core.git` pack while
+    /// the literal-path spelling was denied.
+    #[test]
+    fn glob_directory_with_literal_git_basename_stays_denied_361() {
+        for command in [
+            "/usr/*/git branch -D main",
+            "/usr/*/git branch $name",
+            "/*/bin/git branch -D main",
+            "/opt/?/git branch $name",
+            "$PREFIX/*/git branch -D main",
+        ] {
+            for dialect in [ShellDialect::Unknown, ShellDialect::Posix] {
+                let decision = branch_command_decision_in_dialect(command, dialect);
+                assert!(
+                    matches!(
+                        decision,
+                        BranchCommandDecision::Destructive
+                            | BranchCommandDecision::DestructiveDynamic
+                    ),
+                    "literal git basename must stay fail-closed: {command} ({dialect:?}) -> {decision:?}"
+                );
+            }
+        }
+    }
+
+    /// The #360 allow must not open a bypass: literal branch-mutation flags
+    /// anywhere in the argv after an unbounded executable are evidence in
+    /// plain sight, wherever they sit — including the first argv slot, which
+    /// no dynamic word precedes.
+    #[test]
+    fn literal_mutation_flags_after_wildcard_executable_stay_denied_360() {
+        for command in [
+            "/* -D main",
+            "/* -d feature",
+            "/* --delete feature",
+            "/* --force --delete feature",
+            "/* -M old new",
+            "lib/* -D main",
+            "/* $sub -D main",
+            "$cmd $sub -D main",
+        ] {
+            for dialect in [ShellDialect::Unknown, ShellDialect::Posix] {
+                assert_eq!(
+                    branch_command_decision_in_dialect(command, dialect),
+                    BranchCommandDecision::DestructiveDynamic,
+                    "literal mutation flags stay denied: {command} ({dialect:?})"
                 );
             }
         }
@@ -6200,6 +6503,46 @@ git x",
         assert_blocks_with_severity(&pack, "git checkout -- file.txt", Severity::High);
         assert_blocks_with_pattern(&pack, "git checkout -- file.txt", "checkout-discard");
         assert_blocks(&pack, "git checkout -- .", "discards uncommitted changes");
+    }
+
+    /// #373: the checkout-ref-discard remediation recommends
+    /// `git show <ref>:<path>`, which is safe bare but reaches the identical
+    /// overwrite when redirected back onto the same path. The sibling rule
+    /// denies exactly the same-path redirected shape; every capture to a new
+    /// file and the bare view stay allowed.
+    #[test]
+    fn show_redirect_onto_same_path_is_denied_373() {
+        let pack = create_pack();
+
+        for cmd in [
+            // The reported shape.
+            "git show origin/main:Directory.Packages.props > Directory.Packages.props",
+            "git show HEAD~1:src/config.rs > src/config.rs",
+            "git show origin/main:README.md >> README.md",
+            "git show origin/main:README.md >| README.md",
+            "git show HEAD:a.txt > ./a.txt",
+            "git show HEAD:a.txt > a.txt && cargo build",
+        ] {
+            assert_blocks_with_pattern(&pack, cmd, "show-redirect-overwrite-source");
+            assert_blocks_with_severity(&pack, cmd, Severity::High);
+        }
+
+        // Bare view and captures to a new file are the recommended safe forms.
+        for cmd in [
+            "git show origin/main:Directory.Packages.props",
+            "git show HEAD~1:src/config.rs",
+            "git show origin/main:README.md > README.md.from-ref",
+            "git show origin/main:README.md > /tmp/README.md",
+            "git show HEAD:a.txt > b.txt",
+            "git show HEAD:a.txt | less",
+            "git show HEAD:a.txt | grep TODO",
+        ] {
+            assert!(
+                pack.check(cmd)
+                    .is_none_or(|hit| hit.name != Some("show-redirect-overwrite-source")),
+                "safe form must not match show-redirect-overwrite-source: {cmd:?}"
+            );
+        }
     }
 
     #[test]

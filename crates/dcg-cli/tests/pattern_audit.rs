@@ -312,7 +312,9 @@ fn test_audit_backtracking_requirements() {
                 "mv-tmpdir",
                 "mv-tmpdir-brace",
                 "mv-to-trash",
+                "mv-to-trash-quoted",
                 "mv-var-tmp",
+                "mv-within-home",
                 "redirect-truncate-dynamic-path",
                 "redirect-truncate-root-home",
                 "rsync-sensitive-then-delete",
@@ -337,6 +339,9 @@ fn test_audit_backtracking_requirements() {
                 "unlink-tmpdir",
                 "unlink-tmpdir-brace",
                 "unlink-var-tmp",
+                // Backreferences enforce that the fork-bomb's three
+                // identifiers are the same token (issue #302).
+                "fork-bomb",
             ]),
         ),
         (
@@ -347,6 +352,8 @@ fn test_audit_backtracking_requirements() {
                 "restore-staged-long",
                 "restore-staged-short",
                 "restore-worktree",
+                // Backreference pins redirect target == shown path (#373).
+                "show-redirect-overwrite-source",
             ]),
         ),
         (
@@ -708,6 +715,7 @@ fn test_audit_backtracking_requirements() {
                 "gh-api-delete-actions-secret",
                 "gh-api-delete-actions-variable",
                 "gh-api-delete-deploy-key",
+                "gh-api-delete-generic",
                 "gh-api-delete-hook",
                 "gh-api-delete-release",
                 "gh-api-delete-repo",
@@ -724,6 +732,7 @@ fn test_audit_backtracking_requirements() {
                 "gh-repo-deploy-key-delete",
                 "gh-repo-list-view",
                 "gh-run-cancel",
+                "gh-repo-visibility-change",
                 "gh-secret-delete",
                 "gh-secret-list",
                 "gh-ssh-key-delete",
@@ -1091,7 +1100,13 @@ fn test_audit_backtracking_requirements() {
         ),
         (
             "careful_company_running_windows.guardrails",
-            HashSet::from(["read-only-data-context"]),
+            HashSet::from([
+                "read-only-data-context",
+                // Destination-position detection needs lookaheads to keep a
+                // named -Destination value from running into later
+                // parameters (issue #313).
+                "agent-hook-config-overwrite",
+            ]),
         ),
         (
             "careful_company_running_windows.tunnel",

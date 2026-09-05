@@ -46,7 +46,7 @@
 //! let config = Config::load();
 //! let compiled_overrides = config.overrides.compile();
 //! let enabled_keywords = vec!["git", "rm"];
-//! let allowlists = destructive_command_guard::load_default_allowlists();
+//! let allowlists = dcg_cli::load_default_allowlists();
 //! let result = evaluate_command(
 //!     "git status",
 //!     &config,

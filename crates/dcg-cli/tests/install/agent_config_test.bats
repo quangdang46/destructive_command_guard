@@ -106,13 +106,13 @@ EOF
     CLAUDE_SETTINGS="$HOME/.claude/settings.json"
     mkdir -p "$HOME/.claude"
 
-    # Create settings with dcg hook already present
+    # Create settings with dcg hook already present under the canonical matcher
     cat > "$CLAUDE_SETTINGS" << EOF
 {
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "Bash",
+        "matcher": "Bash|PowerShell",
         "hooks": [
           {"type": "command", "command": "$DEST/dcg"}
         ]
@@ -133,6 +133,70 @@ EOF
     log_test "After: $after"
 
     # CLAUDE_STATUS should be "already"
+    [ "$CLAUDE_STATUS" = "already" ]
+}
+
+@test "configure_claude_code: migrates a legacy Bash-only dcg hook (#226)" {
+    log_test "Testing Claude Code legacy Bash matcher migration..."
+    command -v python3 &>/dev/null || skip "python3 not available"
+
+    CLAUDE_SETTINGS="$HOME/.claude/settings.json"
+    mkdir -p "$HOME/.claude"
+
+    # Pre-#226 registration: the matcher covers only Bash, so Claude Code's
+    # native-Windows PowerShell tool ran completely unguarded.
+    cat > "$CLAUDE_SETTINGS" << EOF
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {"type": "command", "command": "$DEST/dcg"},
+          {"type": "command", "command": "atuin history start"}
+        ]
+      }
+    ]
+  }
+}
+EOF
+
+    configure_claude_code "$CLAUDE_SETTINGS" "0"
+
+    log_test "CLAUDE_STATUS: $CLAUDE_STATUS"
+    log_test "After: $(cat "$CLAUDE_SETTINGS")"
+
+    # A legacy entry must be migrated, never reported as already current.
+    [ "$CLAUDE_STATUS" = "merged" ]
+
+    python3 - "$CLAUDE_SETTINGS" "$DEST/dcg" <<'PY'
+import json
+import sys
+
+settings_file, dcg_path = sys.argv[1:3]
+with open(settings_file, "r") as f:
+    settings = json.load(f)
+
+entries = settings["hooks"]["PreToolUse"]
+commands = [
+    hook.get("command")
+    for entry in entries
+    for hook in entry.get("hooks", [])
+    if isinstance(hook, dict)
+]
+
+# Exactly one dcg hook, hoisted first, under a matcher that covers PowerShell.
+assert commands.count(dcg_path) == 1, commands
+assert entries[0]["matcher"] == "Bash|PowerShell", entries
+assert entries[0]["hooks"][0]["command"] == dcg_path, entries
+# The user's own hook keeps its original, unwidened Bash matcher.
+bash_entries = [e for e in entries if e.get("matcher") == "Bash"]
+assert len(bash_entries) == 1, entries
+assert [h["command"] for h in bash_entries[0]["hooks"]] == ["atuin history start"], entries
+PY
+
+    # Re-running settles: the migrated shape is now current.
+    configure_claude_code "$CLAUDE_SETTINGS" "0"
     [ "$CLAUDE_STATUS" = "already" ]
 }
 
@@ -195,14 +259,12 @@ settings_file, dcg_path = sys.argv[1:3]
 with open(settings_file, "r") as f:
     settings = json.load(f)
 
-commands = []
-for entry in settings["hooks"]["PreToolUse"]:
-    if entry.get("matcher") == "Bash":
-        commands.extend(
-            hook.get("command")
-            for hook in entry.get("hooks", [])
-            if isinstance(hook, dict)
-        )
+commands = [
+    hook.get("command")
+    for entry in settings["hooks"]["PreToolUse"]
+    for hook in entry.get("hooks", [])
+    if isinstance(hook, dict)
+]
 
 assert commands[0] == dcg_path, commands
 assert commands.count(dcg_path) == 1, commands
@@ -247,11 +309,12 @@ settings_file, dcg_path = sys.argv[1:3]
 with open(settings_file, "r") as f:
     settings = json.load(f)
 
-commands = []
-for entry in settings["hooks"]["PreToolUse"]:
-    if entry.get("matcher") == "Bash":
-        for hook in entry.get("hooks", []):
-            commands.append(hook.get("command"))
+commands = [
+    hook.get("command")
+    for entry in settings["hooks"]["PreToolUse"]
+    for hook in entry.get("hooks", [])
+    if isinstance(hook, dict)
+]
 
 assert dcg_path in commands, commands
 assert "/opt/dcgrep/bin/scan" in commands, commands
@@ -283,14 +346,14 @@ EOF
     local no_python_path="$TEST_TMPDIR/no-python-bin"
     mkdir -p "$no_python_path"
     local tool
-    for tool in dirname mkdir cp date grep sed rm mv cat; do
+    for tool in dirname mkdir cp date grep sed tr rm mv cat; do
         ln -s "$(command -v "$tool")" "$no_python_path/$tool"
     done
 
     local old_path="$PATH"
     PATH="$no_python_path"
-    configure_claude_code "$CLAUDE_SETTINGS" "0"
-    local rc=$?
+    local rc=0
+    configure_claude_code "$CLAUDE_SETTINGS" "0" || rc=$?
     PATH="$old_path"
 
     log_test "CLAUDE_STATUS: $CLAUDE_STATUS rc=$rc"
@@ -313,7 +376,7 @@ EOF
   "hooks": {
     "PreToolUse": [
       {
-        "matcher": "Bash",
+        "matcher": "Bash|PowerShell",
         "hooks": [
           {"type": "command", "command": "$DEST/dcg"}
         ]
@@ -326,14 +389,14 @@ EOF
     local no_python_path="$TEST_TMPDIR/no-python-bin"
     mkdir -p "$no_python_path"
     local tool
-    for tool in dirname mkdir cp date grep sed rm mv cat; do
+    for tool in dirname mkdir cp date grep sed tr rm mv cat; do
         ln -s "$(command -v "$tool")" "$no_python_path/$tool"
     done
 
     local old_path="$PATH"
     PATH="$no_python_path"
-    configure_claude_code "$CLAUDE_SETTINGS" "0"
-    local rc=$?
+    local rc=0
+    configure_claude_code "$CLAUDE_SETTINGS" "0" || rc=$?
     PATH="$old_path"
 
     log_test "CLAUDE_STATUS: $CLAUDE_STATUS rc=$rc"
@@ -347,19 +410,19 @@ EOF
 
     CLAUDE_SETTINGS="$HOME/.claude/settings.json"
     mkdir -p "$HOME/.claude"
-    printf '{"hooks":{"PreToolUse":[{"matcher":"Bash","hooks":[{"type":"command","command":"%s"}]}]}}\n' "$DEST/dcg" > "$CLAUDE_SETTINGS"
+    printf '{"hooks":{"PreToolUse":[{"matcher":"Bash|PowerShell","hooks":[{"type":"command","command":"%s"}]}]}}\n' "$DEST/dcg" > "$CLAUDE_SETTINGS"
 
     local no_python_path="$TEST_TMPDIR/no-python-bin"
     mkdir -p "$no_python_path"
     local tool
-    for tool in dirname mkdir cp date grep sed rm mv cat; do
+    for tool in dirname mkdir cp date grep sed tr rm mv cat; do
         ln -s "$(command -v "$tool")" "$no_python_path/$tool"
     done
 
     local old_path="$PATH"
     PATH="$no_python_path"
-    configure_claude_code "$CLAUDE_SETTINGS" "0"
-    local rc=$?
+    local rc=0
+    configure_claude_code "$CLAUDE_SETTINGS" "0" || rc=$?
     PATH="$old_path"
 
     log_test "CLAUDE_STATUS: $CLAUDE_STATUS rc=$rc"
@@ -393,14 +456,14 @@ EOF
     local no_python_path="$TEST_TMPDIR/no-python-bin"
     mkdir -p "$no_python_path"
     local tool
-    for tool in dirname mkdir cp date grep sed rm mv cat; do
+    for tool in dirname mkdir cp date grep sed tr rm mv cat; do
         ln -s "$(command -v "$tool")" "$no_python_path/$tool"
     done
 
     local old_path="$PATH"
     PATH="$no_python_path"
-    configure_claude_code "$CLAUDE_SETTINGS" "0"
-    local rc=$?
+    local rc=0
+    configure_claude_code "$CLAUDE_SETTINGS" "0" || rc=$?
     PATH="$old_path"
 
     log_test "CLAUDE_STATUS: $CLAUDE_STATUS rc=$rc"
@@ -567,14 +630,14 @@ EOF
     local no_python_path="$TEST_TMPDIR/no-python-bin"
     mkdir -p "$no_python_path"
     local tool
-    for tool in dirname mkdir cp date grep sed rm mv cat; do
+    for tool in dirname mkdir cp date grep sed tr rm mv cat; do
         ln -s "$(command -v "$tool")" "$no_python_path/$tool"
     done
 
     local old_path="$PATH"
     PATH="$no_python_path"
-    configure_gemini "$GEMINI_SETTINGS"
-    local rc=$?
+    local rc=0
+    configure_gemini "$GEMINI_SETTINGS" || rc=$?
     PATH="$old_path"
 
     log_test "GEMINI_STATUS: $GEMINI_STATUS rc=$rc"
@@ -695,8 +758,8 @@ PYEOF
     local before
     before=$(cat "$GEMINI_SETTINGS")
 
-    configure_gemini "$GEMINI_SETTINGS"
-    local rc=$?
+    local rc=0
+    configure_gemini "$GEMINI_SETTINGS" || rc=$?
 
     log_test "GEMINI_STATUS: $GEMINI_STATUS"
     log_test "GEMINI_FAILURE_REASON: ${GEMINI_FAILURE_REASON:-}"
@@ -721,8 +784,8 @@ EOF
     local before
     before=$(cat "$GEMINI_SETTINGS")
 
-    configure_gemini "$GEMINI_SETTINGS"
-    local rc=$?
+    local rc=0
+    configure_gemini "$GEMINI_SETTINGS" || rc=$?
 
     log_test "GEMINI_STATUS: $GEMINI_STATUS"
     log_test "GEMINI_FAILURE_REASON: ${GEMINI_FAILURE_REASON:-}"
@@ -764,8 +827,8 @@ EOF
     local before
     before=$(cat "$GEMINI_SETTINGS")
 
-    configure_gemini "$GEMINI_SETTINGS"
-    local rc=$?
+    local rc=0
+    configure_gemini "$GEMINI_SETTINGS" || rc=$?
 
     log_test "GEMINI_STATUS: $GEMINI_STATUS"
     log_test "GEMINI_FAILURE_REASON: ${GEMINI_FAILURE_REASON:-}"
@@ -805,8 +868,8 @@ EOF
     local before
     before=$(cat "$GEMINI_SETTINGS")
 
-    configure_gemini "$GEMINI_SETTINGS"
-    local rc=$?
+    local rc=0
+    configure_gemini "$GEMINI_SETTINGS" || rc=$?
 
     log_test "GEMINI_STATUS: $GEMINI_STATUS"
     log_test "GEMINI_FAILURE_REASON: ${GEMINI_FAILURE_REASON:-}"
@@ -1426,8 +1489,8 @@ EOF
     local before
     before=$(cat "$CURSOR_HOOKS_JSON")
 
-    configure_cursor
-    local rc=$?
+    local rc=0
+    configure_cursor || rc=$?
 
     log_test "configure_cursor rc: $rc"
     log_test "CURSOR_STATUS: $CURSOR_STATUS"
@@ -1456,8 +1519,8 @@ EOF
     local before
     before=$(cat "$CURSOR_HOOKS_JSON")
 
-    configure_cursor
-    local rc=$?
+    local rc=0
+    configure_cursor || rc=$?
 
     log_test "configure_cursor rc: $rc"
     log_test "CURSOR_STATUS: $CURSOR_STATUS"
@@ -1488,8 +1551,8 @@ EOF
     local before
     before=$(cat "$CURSOR_HOOKS_JSON")
 
-    configure_cursor
-    local rc=$?
+    local rc=0
+    configure_cursor || rc=$?
 
     log_test "configure_cursor rc: $rc"
     log_test "CURSOR_STATUS: $CURSOR_STATUS"
@@ -1537,7 +1600,9 @@ PYEOF
 assert_copilot_dcg_hook_count() {
     command -v python3 &>/dev/null || skip "python3 not available"
 
-    python3 - "$COPILOT_HOOK_FILE" "$DEST/dcg" "$1" <<'PYEOF'
+    # The canonical stored form is the double-quoted binary path (survives a
+    # DEST containing spaces), matching configure_posit_assistant.
+    python3 - "$COPILOT_HOOK_FILE" "\"$DEST/dcg\"" "$1" <<'PYEOF'
 import json
 import os
 import shlex
@@ -1591,7 +1656,7 @@ PYEOF
 
     [ "$COPILOT_STATUS" = "created" ]
     [ -f "$COPILOT_HOOK_FILE" ]
-    assert_copilot_first_hook "$DEST/dcg"
+    assert_copilot_first_hook "\"$DEST/dcg\""
     assert_copilot_dcg_hook_count 1
 }
 
@@ -1624,7 +1689,7 @@ EOF
     log_test "Hook content: $(cat "$COPILOT_HOOK_FILE")"
 
     [ "$COPILOT_STATUS" = "merged" ]
-    assert_copilot_first_hook "$DEST/dcg"
+    assert_copilot_first_hook "\"$DEST/dcg\""
     assert_copilot_dcg_hook_count 1
     grep -qF "/opt/dcgrep/bin/scan" "$COPILOT_HOOK_FILE"
     grep -qF "pwsh-dcg-helper" "$COPILOT_HOOK_FILE"
@@ -1673,7 +1738,7 @@ EOF
     log_test "Hook content: $(cat "$COPILOT_HOOK_FILE")"
 
     [ "$COPILOT_STATUS" = "merged" ]
-    assert_copilot_first_hook "$DEST/dcg"
+    assert_copilot_first_hook "\"$DEST/dcg\""
     assert_copilot_dcg_hook_count 1
     grep -qF "atuin history start" "$COPILOT_HOOK_FILE"
 }
@@ -1707,7 +1772,7 @@ EOF
     log_test "Hook content: $(cat "$COPILOT_HOOK_FILE")"
 
     [ "$COPILOT_STATUS" = "merged" ]
-    assert_copilot_first_hook "$DEST/dcg"
+    assert_copilot_first_hook "\"$DEST/dcg\""
     assert_copilot_dcg_hook_count 1
     python3 - "$COPILOT_HOOK_FILE" <<'PYEOF'
 import json
@@ -1755,7 +1820,7 @@ EOF
     log_test "Hook content: $(cat "$COPILOT_HOOK_FILE")"
 
     [ "$COPILOT_STATUS" = "merged" ]
-    assert_copilot_first_hook "$DEST/dcg"
+    assert_copilot_first_hook "\"$DEST/dcg\""
     assert_copilot_dcg_hook_count 1
     grep -qF "postToolUse" "$COPILOT_HOOK_FILE"
     grep -qF "atuin history end" "$COPILOT_HOOK_FILE"
@@ -1771,8 +1836,8 @@ EOF
     local before
     before=$(cat "$COPILOT_HOME/hooks/dcg.json")
 
-    configure_copilot
-    local rc=$?
+    local rc=0
+    configure_copilot || rc=$?
 
     log_test "configure_copilot rc: $rc"
     log_test "COPILOT_STATUS: $COPILOT_STATUS"
@@ -1801,8 +1866,8 @@ EOF
     local before
     before=$(cat "$COPILOT_HOME/hooks/dcg.json")
 
-    configure_copilot
-    local rc=$?
+    local rc=0
+    configure_copilot || rc=$?
 
     log_test "configure_copilot rc: $rc"
     log_test "COPILOT_STATUS: $COPILOT_STATUS"
@@ -1814,6 +1879,165 @@ EOF
     [[ "$COPILOT_FAILURE_REASON" == *"invalid"* ]]
     [ -z "$COPILOT_BACKUP" ]
     [ "$(cat "$COPILOT_HOME/hooks/dcg.json")" = "$before" ]
+}
+
+@test "configure_copilot: adopts existing PascalCase PreToolUse key without duplicating it" {
+    log_test "Testing Copilot PascalCase key adoption (#253)..."
+    command -v python3 &>/dev/null || skip "python3 not available"
+
+    setup_mock_copilot_repo
+    mkdir -p "$COPILOT_HOME/hooks"
+    cat > "$COPILOT_HOME/hooks/dcg.json" <<'EOF'
+{
+  "version": 1,
+  "hooks": {
+    "PreToolUse": [
+      {
+        "type": "command",
+        "bash": "audit-pretool",
+        "powershell": "audit-pretool.exe",
+        "cwd": ".",
+        "timeoutSec": 30
+      }
+    ]
+  }
+}
+EOF
+
+    configure_copilot
+
+    log_test "COPILOT_STATUS: $COPILOT_STATUS"
+    log_test "Hook content: $(cat "$COPILOT_HOOK_FILE")"
+
+    [ "$COPILOT_STATUS" = "merged" ]
+    python3 - "$COPILOT_HOOK_FILE" "\"$DEST/dcg\"" <<'PYEOF'
+import json
+import sys
+
+hook_file, dcg_path = sys.argv[1:3]
+with open(hook_file, "r") as f:
+    config = json.load(f)
+
+keys = [k for k in config["hooks"] if k.lower() == "pretooluse"]
+if keys != ["PreToolUse"]:
+    raise SystemExit(
+        f"expected exactly one hooks key adopting the file's PascalCase spelling, found {keys!r}"
+    )
+
+pre_tool = config["hooks"]["PreToolUse"]
+if pre_tool[0].get("bash") != dcg_path or pre_tool[0].get("powershell") != dcg_path:
+    raise SystemExit(f"first hook is not the current dcg entry: {pre_tool[0]!r}")
+if len(pre_tool) != 2 or pre_tool[1].get("bash") != "audit-pretool":
+    raise SystemExit(f"non-dcg entry was not preserved intact: {pre_tool!r}")
+PYEOF
+}
+
+@test "configure_copilot: repairs duplicated casing keys into one canonical key" {
+    log_test "Testing Copilot duplicate-casing repair (#253)..."
+    command -v python3 &>/dev/null || skip "python3 not available"
+
+    setup_mock_copilot_repo
+    mkdir -p "$COPILOT_HOME/hooks"
+    cat > "$COPILOT_HOME/hooks/dcg.json" <<'EOF'
+{
+  "version": 1,
+  "hooks": {
+    "PreToolUse": [
+      {
+        "type": "command",
+        "bash": "/old/bin/dcg",
+        "powershell": "/old/bin/dcg",
+        "cwd": ".",
+        "timeoutSec": 30
+      },
+      {
+        "type": "command",
+        "bash": "audit-pretool",
+        "powershell": "audit-pretool.exe"
+      }
+    ],
+    "preToolUse": [
+      {
+        "type": "command",
+        "bash": "/stale/bin/dcg",
+        "powershell": "/stale/bin/dcg",
+        "cwd": ".",
+        "timeoutSec": 30
+      },
+      {
+        "type": "command",
+        "bash": "atuin history start",
+        "powershell": "atuin history start"
+      }
+    ]
+  }
+}
+EOF
+
+    configure_copilot
+
+    log_test "COPILOT_STATUS: $COPILOT_STATUS"
+    log_test "Hook content: $(cat "$COPILOT_HOOK_FILE")"
+
+    [ "$COPILOT_STATUS" = "merged" ]
+    assert_copilot_first_hook "\"$DEST/dcg\""
+    assert_copilot_dcg_hook_count 1
+    python3 - "$COPILOT_HOOK_FILE" <<'PYEOF'
+import json
+import sys
+
+with open(sys.argv[1], "r") as f:
+    config = json.load(f)
+
+keys = [k for k in config["hooks"] if k.lower() == "pretooluse"]
+if keys != ["preToolUse"]:
+    raise SystemExit(
+        f"expected the single canonical camelCase key after repair, found {keys!r}"
+    )
+
+bashes = [e.get("bash") for e in config["hooks"]["preToolUse"]]
+for expected in ("audit-pretool", "atuin history start"):
+    if expected not in bashes:
+        raise SystemExit(f"non-dcg entry {expected!r} was dropped: {bashes!r}")
+PYEOF
+}
+
+@test "configure_copilot: spaced DEST is quoted, idempotent, and uninstallable" {
+    log_test "Testing Copilot hook with a DEST containing spaces (#253-adjacent)..."
+    command -v python3 &>/dev/null || skip "python3 not available"
+
+    setup_mock_copilot_repo
+
+    # Reinstall the mock dcg under a destination directory containing a space.
+    DEST="$TEST_TMPDIR/spaced bin"
+    mkdir -p "$DEST"
+    cat > "$DEST/dcg" << 'MOCKEOF'
+#!/bin/bash
+echo "dcg 1.0.0"
+MOCKEOF
+    chmod +x "$DEST/dcg"
+
+    configure_copilot
+    log_test "First run status: $COPILOT_STATUS"
+    log_test "Hook content: $(cat "$COPILOT_HOOK_FILE")"
+    [ "$COPILOT_STATUS" = "created" ]
+    assert_copilot_first_hook "\"$DEST/dcg\""
+    assert_copilot_dcg_hook_count 1
+
+    # Re-run: the quoted command must round-trip through the shlex-based
+    # dedupe as the current dcg entry — not get duplicated.
+    configure_copilot
+    log_test "Second run status: $COPILOT_STATUS"
+    log_test "Hook content: $(cat "$COPILOT_HOOK_FILE")"
+    [ "$COPILOT_STATUS" = "already" ]
+    assert_copilot_dcg_hook_count 1
+
+    # Uninstall must recognize the quoted spaced path too; the dcg-dedicated
+    # hook file empties out and is removed entirely.
+    run unconfigure_copilot
+    log_test "unconfigure_copilot status: $status output: $output"
+    [ "$status" -eq 0 ]
+    [ ! -e "$COPILOT_HOME/hooks/dcg.json" ]
 }
 
 # ============================================================================
@@ -2177,8 +2401,8 @@ EOF
   }
 }'
 
-    configure_codex
-    local rc=$?
+    local rc=0
+    configure_codex || rc=$?
 
     log_test "CODEX_STATUS: $CODEX_STATUS"
     log_test "CODEX_FAILURE_REASON: ${CODEX_FAILURE_REASON:-}"
@@ -2238,11 +2462,15 @@ try {
     exit 3
   }
 }
+exit 0
 '
 
     log_test "pwsh install.ps1 status: $status"
     log_test "pwsh install.ps1 output: $output"
 
+    if [ "$status" -ne 0 ]; then
+        printf 'PowerShell probe failed with status %s:\n%s\n' "$status" "$output" >&3
+    fi
     [ "$status" -eq 0 ]
     assert_codex_hooks_unchanged
 }
@@ -2255,8 +2483,8 @@ try {
     printf '%s\n' '{"hooks":{"PreToolUse":[' > "$CODEX_SETTINGS"
     save_codex_hooks_snapshot
 
-    configure_codex
-    local rc=$?
+    local rc=0
+    configure_codex || rc=$?
 
     log_test "CODEX_STATUS: $CODEX_STATUS"
     log_test "CODEX_FAILURE_REASON: ${CODEX_FAILURE_REASON:-}"
@@ -2276,8 +2504,8 @@ try {
     setup_mock_codex
     seed_codex_hooks_json '{"hooks":["bad-shape"]}'
 
-    configure_codex
-    local rc=$?
+    local rc=0
+    configure_codex || rc=$?
 
     log_test "CODEX_STATUS: $CODEX_STATUS"
     log_test "CODEX_FAILURE_REASON: ${CODEX_FAILURE_REASON:-}"
@@ -2309,8 +2537,8 @@ try {
   }
 }'
 
-    configure_codex
-    local rc=$?
+    local rc=0
+    configure_codex || rc=$?
 
     log_test "CODEX_STATUS: $CODEX_STATUS"
     log_test "CODEX_FAILURE_REASON: ${CODEX_FAILURE_REASON:-}"
@@ -2350,8 +2578,8 @@ EOF
     local saved_path="$PATH"
     PATH="$(create_no_python_path)"
 
-    configure_codex
-    local rc=$?
+    local rc=0
+    configure_codex || rc=$?
 
     PATH="$saved_path"
 
@@ -2639,8 +2867,8 @@ EOF
     assert_codex_hooks_not_contains "/usr/local/bin/dcg"
 }
 
-@test "unconfigure_codex: preserves non-Bash dcg command hook" {
-    log_test "Testing Codex uninstall only removes Bash-owned dcg hooks..."
+@test "unconfigure_codex: removes wrong-matcher dcg command hook" {
+    log_test "Testing Codex uninstall repairs wrong-matcher dcg hooks..."
     command -v python3 &>/dev/null || skip "python3 not available"
 
     seed_codex_hooks_json '{
@@ -2669,8 +2897,8 @@ EOF
     log_codex_hooks_transition
 
     [ "$status" -eq 0 ]
-    assert_codex_hooks_contains '"matcher": "Read"'
-    assert_codex_hooks_contains "/opt/read-hook/dcg"
+    assert_codex_hooks_not_contains '"matcher": "Read"'
+    assert_codex_hooks_not_contains "/opt/read-hook/dcg"
     assert_codex_hooks_contains "atuin history start"
     assert_codex_hooks_not_contains "/usr/local/bin/dcg\""
 }
@@ -3150,4 +3378,1217 @@ hooks_auto_accept: true
     run unconfigure_hermes
     log_test "unconfigure_hermes status: $status"
     [ "$status" -eq 0 ]
+}
+
+# ============================================================================
+# Posit Assistant Configuration Tests
+#
+# Posit Assistant reads Claude-Code-compatible PreToolUse hooks from
+# ~/.posit/assistant/settings.json. Three wire details are asserted on purpose
+# because getting any of them wrong yields a hook that sits in the file but
+# never fires (or breaks on a path with spaces):
+#   - the matcher is lowercase "bash|powershell" (a simple matcher is an exact
+#     match against the tool name; both shell-tool names are covered);
+#   - only documented handler fields are emitted (type/command/timeout, no
+#     `shell` field) and the command path is quoted for shell-form execution;
+#   - `timeout` is in seconds.
+# ============================================================================
+
+@test "configure_posit_assistant: skips when not installed" {
+    log_test "Testing Posit Assistant skip when not installed..."
+
+    POSIT_ASSISTANT_SETTINGS="$HOME/.posit/assistant/settings.json"
+    [ ! -d "$HOME/.posit" ]
+    ! command -v pa >/dev/null 2>&1
+
+    configure_posit_assistant
+
+    log_test "POSIT_ASSISTANT_STATUS: $POSIT_ASSISTANT_STATUS"
+    [ "$POSIT_ASSISTANT_STATUS" = "skipped" ]
+    [ ! -e "$POSIT_ASSISTANT_SETTINGS" ]
+    # A skip must not create the config directory either.
+    [ ! -d "$HOME/.posit" ]
+}
+
+@test "configure_posit_assistant: creates settings.json when ~/.posit/assistant exists" {
+    log_test "Testing Posit Assistant settings creation..."
+    command -v python3 &>/dev/null || skip "python3 not available"
+
+    setup_mock_posit_assistant
+
+    configure_posit_assistant
+
+    log_test "POSIT_ASSISTANT_STATUS: $POSIT_ASSISTANT_STATUS"
+    log_test "settings.json: $(cat "$POSIT_ASSISTANT_SETTINGS" 2>/dev/null || echo 'missing')"
+
+    [ "$POSIT_ASSISTANT_STATUS" = "created" ]
+    [ -f "$POSIT_ASSISTANT_SETTINGS" ]
+    assert_posit_assistant_settings_valid_json
+    assert_posit_assistant_settings_contains '"PreToolUse"'
+    # Lowercase matcher covering both shell-tool names.
+    assert_posit_assistant_settings_contains '"matcher": "bash|powershell"'
+    # The command path is stored quoted so spaces survive shell-form execution.
+    assert_posit_assistant_settings_contains "$DEST/dcg"
+    [ "$(posit_assistant_first_group_first_command)" = "\"$DEST/dcg\"" ]
+    assert_posit_assistant_settings_contains '"timeout": 10'
+    # Only documented handler fields; `shell` is not one of them.
+    assert_posit_assistant_settings_not_contains '"shell"'
+    [ "$AUTO_CONFIGURED" = "1" ]
+}
+
+@test "configure_posit_assistant: treats an existing empty settings.json as create-fresh" {
+    log_test "Testing Posit Assistant empty settings.json handling..."
+    command -v python3 &>/dev/null || skip "python3 not available"
+
+    setup_mock_posit_assistant
+    # An existing 0-byte file (e.g. left behind by a crashed editor or a
+    # `touch`) must configure like a fresh install, not fail as invalid.
+    : > "$POSIT_ASSISTANT_SETTINGS"
+
+    configure_posit_assistant
+
+    log_test "POSIT_ASSISTANT_STATUS: $POSIT_ASSISTANT_STATUS"
+    log_test "settings.json: $(cat "$POSIT_ASSISTANT_SETTINGS" 2>/dev/null || echo 'missing')"
+
+    [ "$POSIT_ASSISTANT_STATUS" = "created" ]
+    assert_posit_assistant_settings_valid_json
+    [ "$(posit_assistant_first_group_first_command)" = "\"$DEST/dcg\"" ]
+
+    # Whitespace-only content is the same case.
+    printf '  \n\t\n' > "$POSIT_ASSISTANT_SETTINGS"
+    configure_posit_assistant
+    log_test "Whitespace-only rerun status: $POSIT_ASSISTANT_STATUS"
+    [ "$POSIT_ASSISTANT_STATUS" = "created" ]
+    assert_posit_assistant_settings_valid_json
+    [ "$(posit_assistant_first_group_first_command)" = "\"$DEST/dcg\"" ]
+}
+
+@test "configure_posit_assistant: detects a bare pa client on PATH" {
+    log_test "Testing Posit Assistant detection via the pa client..."
+    command -v python3 &>/dev/null || skip "python3 not available"
+
+    POSIT_ASSISTANT_SETTINGS="$HOME/.posit/assistant/settings.json"
+    printf '#!/bin/bash\necho "pa 1.2.3"\n' > "$TEST_TMPDIR/bin/pa"
+    chmod +x "$TEST_TMPDIR/bin/pa"
+
+    configure_posit_assistant
+
+    log_test "POSIT_ASSISTANT_STATUS: $POSIT_ASSISTANT_STATUS"
+    [ "$POSIT_ASSISTANT_STATUS" = "created" ]
+    [ -f "$POSIT_ASSISTANT_SETTINGS" ]
+}
+
+@test "configure_posit_assistant: detects the legacy ~/.positai config dir" {
+    log_test "Testing Posit Assistant detection via the legacy config dir..."
+    command -v python3 &>/dev/null || skip "python3 not available"
+
+    POSIT_ASSISTANT_SETTINGS="$HOME/.posit/assistant/settings.json"
+    mkdir -p "$HOME/.positai"
+
+    configure_posit_assistant
+
+    log_test "POSIT_ASSISTANT_STATUS: $POSIT_ASSISTANT_STATUS"
+    [ "$POSIT_ASSISTANT_STATUS" = "created" ]
+    # The hook still lands in the CURRENT location, not the legacy one.
+    [ -f "$POSIT_ASSISTANT_SETTINGS" ]
+    [ ! -e "$HOME/.positai/settings.json" ]
+}
+
+@test "configure_posit_assistant: is idempotent" {
+    log_test "Testing Posit Assistant install idempotency..."
+    command -v python3 &>/dev/null || skip "python3 not available"
+
+    setup_mock_posit_assistant
+
+    configure_posit_assistant
+    [ "$POSIT_ASSISTANT_STATUS" = "created" ]
+    local first
+    first="$(cat "$POSIT_ASSISTANT_SETTINGS")"
+
+    POSIT_ASSISTANT_STATUS=""
+    POSIT_ASSISTANT_BACKUP=""
+    configure_posit_assistant
+
+    log_test "Second-run POSIT_ASSISTANT_STATUS: $POSIT_ASSISTANT_STATUS"
+    [ "$POSIT_ASSISTANT_STATUS" = "already" ]
+    [ "$first" = "$(cat "$POSIT_ASSISTANT_SETTINGS")" ]
+    # An unchanged reinstall must not litter the directory with backups.
+    [ -z "$POSIT_ASSISTANT_BACKUP" ]
+    [ "$(posit_assistant_dcg_hook_count)" = "1" ]
+}
+
+@test "configure_posit_assistant: preserves unrelated settings, groups, and events" {
+    log_test "Testing Posit Assistant merge preservation..."
+    command -v python3 &>/dev/null || skip "python3 not available"
+
+    setup_mock_posit_assistant
+    seed_posit_assistant_settings '{
+  "model": "keep-me",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "bash,edit",
+        "hooks": [
+          { "type": "command", "command": "/usr/local/bin/audit-log" }
+        ]
+      }
+    ],
+    "SessionStart": [
+      { "hooks": [ { "type": "command", "command": "/usr/local/bin/greet" } ] }
+    ]
+  }
+}'
+
+    configure_posit_assistant
+    log_test "POSIT_ASSISTANT_STATUS: $POSIT_ASSISTANT_STATUS"
+    log_test "settings.json: $(cat "$POSIT_ASSISTANT_SETTINGS")"
+
+    [ "$POSIT_ASSISTANT_STATUS" = "merged" ]
+    [ -f "$POSIT_ASSISTANT_BACKUP" ]
+    assert_posit_assistant_settings_contains '"model"'
+    assert_posit_assistant_settings_contains 'keep-me'
+    # The user's comma-separated matcher group is preserved verbatim rather
+    # than consolidated into ours (hook config is additive).
+    assert_posit_assistant_settings_contains '"bash,edit"'
+    assert_posit_assistant_settings_contains 'audit-log'
+    assert_posit_assistant_settings_contains 'greet'
+    [ "$(posit_assistant_dcg_hook_count)" = "1" ]
+    # dcg's group sits first so a denial fires before other hooks.
+    [ "$(posit_assistant_first_group_matcher)" = "bash|powershell" ]
+    [ "$(posit_assistant_first_group_first_command)" = "\"$DEST/dcg\"" ]
+    [ "$(posit_assistant_group_count)" = "2" ]
+}
+
+@test "configure_posit_assistant: replaces stale dcg paths without duplicating" {
+    log_test "Testing Posit Assistant stale-path repair..."
+    command -v python3 &>/dev/null || skip "python3 not available"
+
+    setup_mock_posit_assistant
+    seed_posit_assistant_settings '{
+  "hooks": {
+    "PreToolUse": [
+      { "matcher": "bash", "hooks": [ { "type": "command", "command": "/old/path/dcg" } ] },
+      { "matcher": "bash|powershell", "hooks": [ { "type": "command", "command": "\"/another/dcg\"", "timeout": 10 } ] }
+    ]
+  }
+}'
+
+    configure_posit_assistant
+    log_test "POSIT_ASSISTANT_STATUS: $POSIT_ASSISTANT_STATUS"
+    log_test "settings.json: $(cat "$POSIT_ASSISTANT_SETTINGS")"
+
+    [ "$POSIT_ASSISTANT_STATUS" = "merged" ]
+    assert_posit_assistant_settings_not_contains '/old/path/dcg'
+    assert_posit_assistant_settings_not_contains '/another/dcg'
+    assert_posit_assistant_settings_contains "$DEST/dcg"
+    [ "$(posit_assistant_dcg_hook_count)" = "1" ]
+    # Groups that existed only to run dcg are pruned, not left empty.
+    [ "$(posit_assistant_group_count)" = "1" ]
+}
+
+@test "configure_posit_assistant: preserves a lookalike tool whose name contains dcg" {
+    log_test "Testing Posit Assistant basename matching..."
+    command -v python3 &>/dev/null || skip "python3 not available"
+
+    setup_mock_posit_assistant
+    seed_posit_assistant_settings '{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "bash",
+        "hooks": [
+          { "type": "command", "command": "/opt/dcgrep/bin/dcgworkflow --scan" }
+        ]
+      }
+    ]
+  }
+}'
+
+    configure_posit_assistant
+    log_test "settings.json: $(cat "$POSIT_ASSISTANT_SETTINGS")"
+
+    [ "$POSIT_ASSISTANT_STATUS" = "merged" ]
+    assert_posit_assistant_settings_contains 'dcgworkflow'
+    # Only the real dcg counts.
+    [ "$(posit_assistant_dcg_hook_count)" = "1" ]
+    [ "$(posit_assistant_group_count)" = "2" ]
+}
+
+@test "configure_posit_assistant: leaves invalid JSON untouched" {
+    log_test "Testing Posit Assistant invalid-JSON refusal..."
+    command -v python3 &>/dev/null || skip "python3 not available"
+
+    setup_mock_posit_assistant
+    seed_posit_assistant_settings '{ this is not json'
+
+    configure_posit_assistant
+    log_test "POSIT_ASSISTANT_STATUS: $POSIT_ASSISTANT_STATUS"
+
+    [ "$POSIT_ASSISTANT_STATUS" = "failed" ]
+    [[ "$POSIT_ASSISTANT_FAILURE_REASON" == *"invalid"* ]]
+    assert_posit_assistant_settings_unchanged
+    # A refusal must not leave a backup file behind.
+    [ -z "$POSIT_ASSISTANT_BACKUP" ]
+}
+
+@test "configure_posit_assistant: leaves a malformed PreToolUse shape untouched" {
+    log_test "Testing Posit Assistant malformed-shape refusal..."
+    command -v python3 &>/dev/null || skip "python3 not available"
+
+    setup_mock_posit_assistant
+    seed_posit_assistant_settings '{"hooks": {"PreToolUse": "not-a-list"}}'
+
+    configure_posit_assistant
+    log_test "POSIT_ASSISTANT_STATUS: $POSIT_ASSISTANT_STATUS"
+
+    [ "$POSIT_ASSISTANT_STATUS" = "failed" ]
+    assert_posit_assistant_settings_unchanged
+}
+
+@test "detect_agents: reports posit-assistant when the config dir exists" {
+    log_test "Testing Posit Assistant agent detection..."
+
+    setup_mock_posit_assistant
+
+    detect_agents
+    log_test "DETECTED_AGENTS: ${DETECTED_AGENTS[*]}"
+
+    is_agent_detected posit-assistant
+}
+
+@test "detect_agents: a bare ~/.posit directory is not enough" {
+    log_test "Testing that ~/.posit alone does not count as Posit Assistant..."
+
+    mkdir -p "$HOME/.posit"
+
+    detect_agents
+    log_test "DETECTED_AGENTS: ${DETECTED_AGENTS[*]}"
+
+    ! is_agent_detected posit-assistant
+}
+
+@test "unconfigure_posit_assistant: removes only dcg and leaves siblings intact" {
+    log_test "Testing Posit Assistant uninstall..."
+    command -v python3 &>/dev/null || skip "python3 not available"
+
+    setup_mock_posit_assistant
+    # Install through the real code path so the seeded shape cannot drift from
+    # what the installer actually writes, then add siblings to preserve.
+    configure_posit_assistant
+    [ "$POSIT_ASSISTANT_STATUS" = "created" ]
+    posit_assistant_add_sibling_hooks
+
+    run unconfigure_posit_assistant
+    log_test "unconfigure_posit_assistant status: $status"
+    log_test "settings.json after uninstall: $(cat "$POSIT_ASSISTANT_SETTINGS" 2>/dev/null || echo 'missing')"
+
+    [ "$status" -eq 0 ]
+    [ -f "$POSIT_ASSISTANT_SETTINGS" ]
+    assert_posit_assistant_settings_not_contains "$DEST/dcg"
+    assert_posit_assistant_settings_contains 'audit-log'
+    assert_posit_assistant_settings_contains 'greet'
+    [ "$(posit_assistant_dcg_hook_count)" = "0" ]
+}
+
+@test "unconfigure_posit_assistant: keeps the file when dcg was the only hook" {
+    log_test "Testing Posit Assistant uninstall of a dcg-only config..."
+    command -v python3 &>/dev/null || skip "python3 not available"
+
+    setup_mock_posit_assistant
+    configure_posit_assistant
+    [ "$POSIT_ASSISTANT_STATUS" = "created" ]
+
+    run unconfigure_posit_assistant
+    log_test "unconfigure_posit_assistant status: $status"
+
+    [ "$status" -eq 0 ]
+    # Posit Assistant keeps unrelated settings in this file, so it is never
+    # deleted — only the emptied PreToolUse key is dropped.
+    [ -f "$POSIT_ASSISTANT_SETTINGS" ]
+    assert_posit_assistant_settings_valid_json
+    assert_posit_assistant_settings_not_contains '"PreToolUse"'
+}
+
+@test "unconfigure_posit_assistant: does not touch a config without dcg" {
+    log_test "Testing Posit Assistant uninstall no-op..."
+    command -v python3 &>/dev/null || skip "python3 not available"
+
+    setup_mock_posit_assistant
+    seed_posit_assistant_settings '{"hooks":{"PreToolUse":[{"matcher":"bash","hooks":[{"type":"command","command":"/opt/dcgrep/bin/dcgworkflow"}]}]}}'
+
+    run unconfigure_posit_assistant
+    log_test "unconfigure_posit_assistant status: $status"
+
+    [ "$status" -eq 0 ]
+    assert_posit_assistant_settings_unchanged
+}
+
+@test "unconfigure_posit_assistant: noop on missing settings" {
+    log_test "Testing Posit Assistant uninstall with no settings file..."
+
+    POSIT_ASSISTANT_SETTINGS="$HOME/.posit/assistant/settings.json"
+    [ ! -f "$POSIT_ASSISTANT_SETTINGS" ]
+
+    run unconfigure_posit_assistant
+    log_test "unconfigure_posit_assistant status: $status"
+    [ "$status" -eq 0 ]
+}
+
+# ============================================================================
+# OpenCode Configuration Tests (#318)
+# ============================================================================
+
+# The real plugin-generation behavior (marker, embedded path, refusal to
+# overwrite user-owned files) is covered by Rust tests against the real
+# binary (tests/cli_e2e.rs). These tests cover configure_opencode's own
+# logic: detection gating, delegation to `dcg install --opencode --force`,
+# and status mapping of the binary's outcomes.
+
+make_opencode_mock_dcg() {
+    # $1 = behavior: "ok" writes the plugin and exits 0; "conflict" emits the
+    # ownership-refusal message and exits 1; "fail" exits 1 with a generic
+    # error.
+    #
+    # Pin XDG_CONFIG_HOME inside the isolated HOME so a host value cannot
+    # leak into path assertions.
+    export XDG_CONFIG_HOME="$HOME/.config"
+    local behavior="$1"
+    cat > "$DEST/dcg" << MOCKEOF
+#!/bin/bash
+if [ "\$1" = "install" ] && [ "\$2" = "--opencode" ]; then
+    case "$behavior" in
+        ok)
+            plugin_dir="\${XDG_CONFIG_HOME:-\$HOME/.config}/opencode/plugins"
+            mkdir -p "\$plugin_dir"
+            printf '// dcg-opencode-plugin: generated by dcg installer (mock)\n' > "\$plugin_dir/dcg-guard.js"
+            echo "OpenCode plugin installed successfully!"
+            exit 0
+            ;;
+        conflict)
+            echo "dcg-guard.js exists but was not generated by dcg (missing the marker)." >&2
+            exit 1
+            ;;
+        fail)
+            echo "some unexpected failure" >&2
+            exit 1
+            ;;
+    esac
+fi
+echo "dcg 1.0.0"
+MOCKEOF
+    chmod +x "$DEST/dcg"
+}
+
+@test "configure_opencode: skipped when OpenCode not detected" {
+    export XDG_CONFIG_HOME="$HOME/.config"
+    DETECTED_AGENTS=()
+    OPENCODE_STATUS=""
+
+    configure_opencode
+
+    [ "$OPENCODE_STATUS" = "skipped" ]
+    [ ! -f "$HOME/.config/opencode/plugins/dcg-guard.js" ]
+}
+
+@test "configure_opencode: delegates to dcg install --opencode and reports created" {
+    DETECTED_AGENTS=("opencode")
+    OPENCODE_STATUS=""
+    AUTO_CONFIGURED=0
+    make_opencode_mock_dcg ok
+
+    configure_opencode
+
+    log_test "OPENCODE_STATUS=$OPENCODE_STATUS"
+    [ "$OPENCODE_STATUS" = "created" ]
+    [ "$AUTO_CONFIGURED" -eq 1 ]
+    [ -f "$HOME/.config/opencode/plugins/dcg-guard.js" ]
+    grep -q 'dcg-opencode-plugin' "$HOME/.config/opencode/plugins/dcg-guard.js"
+}
+
+@test "configure_opencode: reports merged when a plugin already existed" {
+    DETECTED_AGENTS=("opencode")
+    OPENCODE_STATUS=""
+    make_opencode_mock_dcg ok
+    mkdir -p "$HOME/.config/opencode/plugins"
+    printf '// dcg-opencode-plugin: older install\n' > "$HOME/.config/opencode/plugins/dcg-guard.js"
+
+    configure_opencode
+
+    [ "$OPENCODE_STATUS" = "merged" ]
+}
+
+@test "configure_opencode: maps ownership refusal to conflict" {
+    DETECTED_AGENTS=("opencode")
+    OPENCODE_STATUS=""
+    make_opencode_mock_dcg conflict
+    mkdir -p "$HOME/.config/opencode/plugins"
+    printf 'export const Mine = async () => ({});\n' > "$HOME/.config/opencode/plugins/dcg-guard.js"
+
+    run configure_opencode
+    # Re-run in the current shell to capture the status variable (bats `run`
+    # executes in a subshell).
+    configure_opencode || true
+
+    log_test "OPENCODE_STATUS=$OPENCODE_STATUS"
+    [ "$OPENCODE_STATUS" = "conflict" ]
+    grep -q 'Mine' "$HOME/.config/opencode/plugins/dcg-guard.js"
+}
+
+@test "configure_opencode: maps other failures to failed with reason" {
+    DETECTED_AGENTS=("opencode")
+    OPENCODE_STATUS=""
+    make_opencode_mock_dcg fail
+
+    configure_opencode || true
+
+    [ "$OPENCODE_STATUS" = "failed" ]
+    [ -n "$OPENCODE_FAILURE_REASON" ]
+}
+
+# ============================================================================
+# OpenCode Uninstall Tests (#318)
+# ============================================================================
+
+@test "unconfigure_opencode: removes dcg-owned plugin only" {
+    export XDG_CONFIG_HOME="$HOME/.config"
+    mkdir -p "$HOME/.config/opencode/plugins"
+    printf '// dcg-opencode-plugin: generated\n' > "$HOME/.config/opencode/plugins/dcg-guard.js"
+
+    run unconfigure_opencode
+    [ "$status" -eq 0 ]
+    [ ! -f "$HOME/.config/opencode/plugins/dcg-guard.js" ]
+}
+
+@test "unconfigure_opencode: preserves user-owned plugin without marker" {
+    export XDG_CONFIG_HOME="$HOME/.config"
+    mkdir -p "$HOME/.config/opencode/plugins"
+    printf 'export const Mine = async () => ({});\n' > "$HOME/.config/opencode/plugins/dcg-guard.js"
+
+    run unconfigure_opencode
+    [ "$status" -eq 0 ]
+    [ -f "$HOME/.config/opencode/plugins/dcg-guard.js" ]
+    grep -q 'Mine' "$HOME/.config/opencode/plugins/dcg-guard.js"
+}
+
+@test "unconfigure_opencode: noop when plugin missing" {
+    export XDG_CONFIG_HOME="$HOME/.config"
+    run unconfigure_opencode
+    [ "$status" -eq 0 ]
+}
+
+@test "unconfigure_opencode: checks a repo-root project plugin only once" {
+    export XDG_CONFIG_HOME="$HOME/.config"
+    mkdir -p "$TEST_WORKDIR/.git" "$TEST_WORKDIR/.opencode/plugins"
+    printf '// dcg-opencode-plugin: generated\n' > "$TEST_WORKDIR/.opencode/plugins/dcg-guard.js"
+    local removal_log="$TEST_TMPDIR/opencode-removals.log"
+    rm() {
+        printf '%s\n' "$2" >> "$removal_log"
+    }
+
+    run unconfigure_opencode
+    unset -f rm
+
+    [ "$status" -eq 0 ]
+    [ "$(grep -cFx "$TEST_WORKDIR/.opencode/plugins/dcg-guard.js" "$removal_log")" -eq 1 ]
+    [ "$(wc -l < "$removal_log")" -eq 1 ]
+}
+
+@test "unconfigure_opencode: preserves a user-owned repo-root project plugin" {
+    export XDG_CONFIG_HOME="$HOME/.config"
+    mkdir -p "$TEST_WORKDIR/.git" "$TEST_WORKDIR/.opencode/plugins"
+    local plugin="$TEST_WORKDIR/.opencode/plugins/dcg-guard.js"
+    local snapshot="$TEST_TMPDIR/opencode-project.user.js"
+    printf 'export const Mine = async () => ({});\n' > "$plugin"
+    cp "$plugin" "$snapshot"
+
+    run unconfigure_opencode
+
+    [ "$status" -eq 0 ]
+    cmp -s "$snapshot" "$plugin"
+}
+
+@test "current_repo_root: retains physical-cwd fallback outside Git" {
+    run current_repo_root
+
+    [ "$status" -eq 0 ]
+    [ "$output" = "$TEST_WORKDIR" ]
+}
+
+@test "current_repo_root: cwd resolution failure is explicit and emits no path" {
+    pwd() {
+        return 1
+    }
+
+    run current_repo_root
+    unset -f pwd
+
+    [ "$status" -ne 0 ]
+    [ -z "$output" ]
+}
+
+# ============================================================================
+# Oh My Pi Configuration and Uninstall Tests
+# ============================================================================
+
+make_omp_mock_dcg() {
+    local behavior="$1"
+    cat > "$DEST/dcg" << MOCKEOF
+#!/bin/bash
+if [ "\$1" = "install" ] && [ "\$2" = "--omp" ]; then
+    case "$behavior" in
+        ok)
+            extension_dir="\${MOCK_OMP_EXTENSION_DIR:-\${PI_CODING_AGENT_DIR:-\$HOME/.omp/agent}/extensions}"
+            mkdir -p "\$extension_dir"
+            printf '// dcg-omp-extension: generated by dcg installer (mock)\n' > "\$extension_dir/dcg-guard.ts"
+            echo "OMP extension installed successfully!"
+            exit 0
+            ;;
+        conflict)
+            echo "dcg-guard.ts exists but was not generated by dcg (missing the marker)." >&2
+            exit 1
+            ;;
+        fail)
+            echo "some unexpected failure" >&2
+            exit 1
+            ;;
+    esac
+fi
+echo "dcg 1.0.0"
+MOCKEOF
+    chmod +x "$DEST/dcg"
+}
+
+@test "resolve_omp_config_root: matches Node POSIX path-join classes" {
+    unset PI_CONFIG_DIR
+    run resolve_omp_config_root
+    [ "$status" -eq 0 ]
+    [ "$output" = "$HOME/.omp" ]
+
+    export PI_CONFIG_DIR=""
+    run resolve_omp_config_root
+    [ "$status" -eq 0 ]
+    [ "$output" = "$HOME/.omp" ]
+
+    local -a config_names=(
+        "default"
+        '\.omp'
+        "/.omp"
+        "//.omp"
+        "a//b"
+        "a/./b"
+        "a/../b"
+        "a/../../b"
+        "../../../../../../../../../../../../../../../../../../../../x"
+        "a/"
+        "/"
+        "."
+        ".."
+        'C:\omp'
+    )
+    local -a expected_roots=(
+        "$HOME/default"
+        "$HOME/\.omp"
+        "$HOME/.omp"
+        "$HOME/.omp"
+        "$HOME/a/b"
+        "$HOME/a/b"
+        "$HOME/b"
+        "$(dirname "$HOME")/b"
+        "/x"
+        "$HOME/a"
+        "$HOME"
+        "$HOME"
+        "$(dirname "$HOME")"
+        "$HOME/C:\omp"
+    )
+    local index
+    for ((index = 0; index < ${#config_names[@]}; index++)); do
+        export PI_CONFIG_DIR="${config_names[$index]}"
+        run resolve_omp_config_root
+        [ "$status" -eq 0 ]
+        [ "$output" = "${expected_roots[$index]}" ]
+    done
+}
+
+@test "resolve_omp_agent_dir: normalizes config root before stale provenance" {
+    export PI_CONFIG_DIR="outer/../normalized-omp"
+    export OMP_PROFILE="default"
+    export PI_PROFILE="work"
+    export PI_CODING_AGENT_DIR="$HOME/normalized-omp/profiles/work/agent"
+
+    run resolve_omp_agent_dir
+
+    [ "$status" -eq 0 ]
+    [ "$output" = "$HOME/normalized-omp/agent" ]
+}
+
+@test "resolve_omp_agent_dir: suppresses only an exact validated stale profile derivation" {
+    export PI_CONFIG_DIR=".custom-omp"
+    local config_root="$HOME/.custom-omp"
+    local default_agent="$config_root/agent"
+    local derived_agent="$config_root/profiles/work/agent"
+
+    export OMP_PROFILE=""
+    export PI_PROFILE="work"
+    export PI_CODING_AGENT_DIR="$derived_agent"
+    run resolve_omp_agent_dir
+    [ "$status" -eq 0 ]
+    [ "$output" = "$default_agent" ]
+
+    export OMP_PROFILE="default"
+    run resolve_omp_agent_dir
+    [ "$status" -eq 0 ]
+    [ "$output" = "$default_agent" ]
+
+    local override
+    for override in \
+        "$TEST_TMPDIR/operator-custom-agent" \
+        "$config_root/profiles/work/agent-sibling" \
+        "$config_root/profiles/Work/agent" \
+        "$config_root/profiles/./work/agent" \
+        "$config_root/profiles//work/agent" \
+        "$derived_agent/"; do
+        export PI_CODING_AGENT_DIR="$override"
+        run resolve_omp_agent_dir
+        [ "$status" -eq 0 ]
+        [ "$output" = "$override" ]
+    done
+
+    export PI_PROFILE="Upper"
+    export PI_CODING_AGENT_DIR="$config_root/profiles/Upper/agent"
+    run resolve_omp_agent_dir
+    [ "$status" -eq 0 ]
+    [ "$output" = "$PI_CODING_AGENT_DIR" ]
+
+    unset PI_PROFILE
+    export PI_CODING_AGENT_DIR="$derived_agent"
+    run resolve_omp_agent_dir
+    [ "$status" -eq 0 ]
+    [ "$output" = "$derived_agent" ]
+
+    export OMP_PROFILE="invalid/profile"
+    export PI_PROFILE="work"
+    export PI_CODING_AGENT_DIR="$derived_agent"
+    run resolve_omp_agent_dir
+    [ "$status" -eq 0 ]
+    [ "$output" = "$derived_agent" ]
+
+    export OMP_PROFILE="work"
+    export PI_PROFILE="other"
+    export PI_CODING_AGENT_DIR="$TEST_TMPDIR/ignored-custom-agent"
+    run resolve_omp_agent_dir
+    [ "$status" -eq 0 ]
+    [ "$output" = "$derived_agent" ]
+
+    unset OMP_PROFILE
+    export PI_PROFILE="work"
+    export PI_CODING_AGENT_DIR="$TEST_TMPDIR/ignored-legacy-custom-agent"
+    run resolve_omp_agent_dir
+    [ "$status" -eq 0 ]
+    [ "$output" = "$derived_agent" ]
+
+    export OMP_PROFILE=""
+    unset PI_PROFILE PI_CODING_AGENT_DIR
+    run resolve_omp_agent_dir
+    [ "$status" -eq 0 ]
+    [ "$output" = "$default_agent" ]
+}
+
+@test "OMP shell resolvers preserve trailing LF bytes through internal captures" {
+    command -v python3 >/dev/null 2>&1 || skip "python3 not available"
+
+    export PI_CONFIG_DIR=$'cfg\n'
+    unset OMP_PROFILE PI_PROFILE PI_CODING_AGENT_DIR
+    local resolved_file="$TEST_TMPDIR/resolved-agent.bin"
+    resolve_omp_agent_dir > "$resolved_file"
+    python3 - "$resolved_file" "$HOME" <<'PY'
+import os
+import sys
+
+resolved_file, home = sys.argv[1:]
+with open(resolved_file, "rb") as handle:
+    actual = handle.read()
+expected = os.fsencode(home) + b"/cfg\n/agent\n"
+if actual != expected:
+    raise SystemExit(f"agent-dir bytes differ: actual={actual!r}, expected={expected!r}")
+PY
+
+    collect_omp_uninstall_extensions
+    local expected_extension="$HOME/cfg"$'\n'"/agent/extensions/dcg-guard.ts"
+    local extension
+    local found=0
+    for extension in "${OMP_UNINSTALL_EXTENSIONS[@]}"; do
+        if [ "$extension" = "$expected_extension" ]; then
+            found=1
+            break
+        fi
+    done
+    [ "$found" -eq 1 ]
+
+    export PI_CONFIG_DIR=""
+    export PI_CODING_AGENT_DIR="$TEST_TMPDIR/custom-agent"$'\n'
+    local installed_extension="$PI_CODING_AGENT_DIR/extensions/dcg-guard.ts"
+    mkdir -p "$(dirname "$installed_extension")"
+    printf '// dcg-omp-extension: generated\n' > "$installed_extension"
+    DETECTED_AGENTS=("omp")
+    OMP_STATUS=""
+    make_omp_mock_dcg ok
+
+    configure_omp
+
+    [ "$OMP_STATUS" = "merged" ]
+    [ -f "$installed_extension" ]
+}
+
+@test "OMP shell profile validation rejects an embedded newline as one value" {
+    export OMP_PROFILE=$'work\n../../../../victim'
+    unset PI_PROFILE PI_CONFIG_DIR
+    export PI_CODING_AGENT_DIR="$TEST_TMPDIR/operator-agent"
+
+    run resolve_omp_agent_dir
+
+    [ "$status" -eq 0 ]
+    [ "$output" = "$PI_CODING_AGENT_DIR" ]
+
+    unset PI_CODING_AGENT_DIR
+    local synthetic_component="$HOME/.omp/profiles/work"$'\n'".."
+    local outside_extension="$HOME/victim/agent/extensions/dcg-guard.ts"
+    mkdir -p "$synthetic_component" "$(dirname "$outside_extension")"
+    printf '// dcg-omp-extension: generated\n' > "$outside_extension"
+
+    local inspect_status
+    if inspect_omp_uninstall_extensions; then
+        inspect_status=0
+    else
+        inspect_status=$?
+    fi
+
+    [ "$inspect_status" -eq 1 ]
+    [ "${#OMP_UNINSTALL_OWNED_EXTENSIONS[@]}" -eq 0 ]
+    [ -f "$outside_extension" ]
+}
+
+@test "unconfigure_omp: active default resolves before the stale cleanup candidate" {
+    extract_uninstall_functions
+    export PI_CONFIG_DIR=".custom-omp"
+    export OMP_PROFILE="default"
+    export PI_PROFILE="work"
+    export PI_CODING_AGENT_DIR="$HOME/.custom-omp/profiles/work/agent"
+    local default_extension="$HOME/.custom-omp/agent/extensions/dcg-guard.ts"
+    local stale_extension="$PI_CODING_AGENT_DIR/extensions/dcg-guard.ts"
+    local removal_log="$TEST_TMPDIR/omp-removal-order.log"
+    mkdir -p "$(dirname "$default_extension")" "$(dirname "$stale_extension")"
+    printf '// dcg-omp-extension: generated\n' > "$default_extension"
+    printf '// dcg-omp-extension: generated\n' > "$stale_extension"
+    rm() {
+        local target=""
+        local arg
+        for arg in "$@"; do target="$arg"; done
+        printf '%s\n' "$target" >> "$removal_log"
+        return 0
+    }
+
+    run unconfigure_omp
+    unset -f rm
+
+    [ "$status" -eq 0 ]
+    [ "$(sed -n '1p' "$removal_log")" = "$default_extension" ]
+    [ "$(sed -n '2p' "$removal_log")" = "$stale_extension" ]
+}
+
+@test "unconfigure_omp: config-root resolver matches Node POSIX normalization" {
+    extract_uninstall_functions
+
+    export PI_CONFIG_DIR='outer/../normalized-omp'
+    run resolve_omp_uninstall_config_root
+    [ "$status" -eq 0 ]
+    [ "$output" = "$HOME/normalized-omp" ]
+
+    export PI_CONFIG_DIR='\.literal-backslash'
+    run resolve_omp_uninstall_config_root
+    [ "$status" -eq 0 ]
+    [ "$output" = "$HOME/\.literal-backslash" ]
+
+    export PI_CONFIG_DIR='../../../../../../../../../../../../../../../../../../../../x'
+    run resolve_omp_uninstall_config_root
+    [ "$status" -eq 0 ]
+    [ "$output" = "/x" ]
+}
+
+@test "configure_omp: skipped when OMP not detected" {
+    DETECTED_AGENTS=()
+    OMP_STATUS=""
+
+    configure_omp
+
+    [ "$OMP_STATUS" = "skipped" ]
+    [ ! -f "$HOME/.omp/agent/extensions/dcg-guard.ts" ]
+}
+
+@test "configure_omp: delegates to dcg install --omp and reports created" {
+    DETECTED_AGENTS=("omp")
+    OMP_STATUS=""
+    AUTO_CONFIGURED=0
+    make_omp_mock_dcg ok
+
+    configure_omp
+
+    [ "$OMP_STATUS" = "created" ]
+    [ "$AUTO_CONFIGURED" -eq 1 ]
+    grep -q 'dcg-omp-extension' "$HOME/.omp/agent/extensions/dcg-guard.ts"
+}
+
+@test "configure_omp: reports a refresh for an existing named-profile extension" {
+    DETECTED_AGENTS=("omp")
+    OMP_STATUS=""
+    AUTO_CONFIGURED=0
+    export OMP_PROFILE="work"
+    local extension="$HOME/.omp/profiles/work/agent/extensions/dcg-guard.ts"
+    export MOCK_OMP_EXTENSION_DIR="$(dirname "$extension")"
+    mkdir -p "$(dirname "$extension")"
+    printf '// dcg-omp-extension: stale\n' > "$extension"
+    make_omp_mock_dcg ok
+
+    configure_omp
+
+    [ "$OMP_STATUS" = "merged" ]
+    [ "$AUTO_CONFIGURED" -eq 1 ]
+    grep -q 'generated by dcg installer (mock)' "$extension"
+}
+
+@test "configure_omp: maps ownership refusal to conflict" {
+    DETECTED_AGENTS=("omp")
+    OMP_STATUS=""
+    make_omp_mock_dcg conflict
+    mkdir -p "$HOME/.omp/agent/extensions"
+    printf 'export default function mine() {}\n' > "$HOME/.omp/agent/extensions/dcg-guard.ts"
+
+    configure_omp || true
+
+    [ "$OMP_STATUS" = "conflict" ]
+    grep -q 'mine' "$HOME/.omp/agent/extensions/dcg-guard.ts"
+}
+
+@test "installer: OMP ownership conflict reaches summary without touching user extension" {
+    local payload_dir="$TEST_TMPDIR/omp-conflict-payload"
+    local artifact="$TEST_TMPDIR/dcg-omp-conflict.tar"
+    local calls="$TEST_TMPDIR/omp-conflict-calls.log"
+    local user_extension="$HOME/.omp/agent/extensions/dcg-guard.ts"
+    local user_snapshot="$TEST_TMPDIR/dcg-guard.user.ts"
+    local install_dest="$TEST_TMPDIR/full-install-bin"
+    mkdir -p "$payload_dir" "$(dirname "$user_extension")"
+    cat > "$payload_dir/dcg" <<'MOCKEOF'
+#!/bin/bash
+printf '%s\n' "$*" >> "$MOCK_DCG_CALLS"
+case "${1:-}" in
+    --version)
+        printf 'dcg 9.9.9\n'
+        exit 0
+        ;;
+    completions)
+        exit 1
+        ;;
+    install)
+        if [ "${2:-}" = "--omp" ]; then
+            printf 'dcg-guard.ts exists but was not generated by dcg (missing the marker).\n' >&2
+            exit 1
+        fi
+        ;;
+esac
+exit 0
+MOCKEOF
+    chmod +x "$payload_dir/dcg"
+    printf 'export default function mine() { return "user-owned"; }\n' > "$user_extension"
+    cp "$user_extension" "$user_snapshot"
+    COPYFILE_DISABLE=1 tar -cf "$artifact" -C "$payload_dir" dcg
+
+    run env \
+        HOME="$HOME" \
+        PATH="$PATH" \
+        SHELL=/bin/false \
+        DCG_SELF_HEAL_HOOK=0 \
+        MOCK_DCG_CALLS="$calls" \
+        bash "$INSTALL_SCRIPT" \
+            --version v9.9.9 \
+            --artifact-url "file://$artifact" \
+            --dest "$install_dest" \
+            --offline \
+            --no-verify \
+            --no-gum
+
+    [ "$status" -eq 0 ]
+    grep -Fxq 'install --omp --force' "$calls"
+    [[ "$output" == *"dcg is now active!"* ]]
+    [[ "$output" == *"Oh My Pi:    Skipped — existing dcg-guard.ts is not dcg-owned"* ]]
+    cmp -s "$user_snapshot" "$user_extension"
+}
+
+@test "OMP pre-confirmation inventory discloses every marker-owned cleanup scope without mutation" {
+    QUIET=0
+    export PI_CONFIG_DIR=".custom-omp"
+    export OMP_PROFILE="work"
+    export PI_CODING_AGENT_DIR="$TEST_TMPDIR/raw-omp-agent"
+    local -a extensions=(
+        "$HOME/.custom-omp/profiles/work/agent/extensions/dcg-guard.ts"
+        "$HOME/.custom-omp/agent/extensions/dcg-guard.ts"
+        "$HOME/.omp/agent/extensions/dcg-guard.ts"
+        "$HOME/.omp/profiles/default-inactive/agent/extensions/dcg-guard.ts"
+        "$HOME/.custom-omp/profiles/custom-inactive/agent/extensions/dcg-guard.ts"
+        "$PI_CODING_AGENT_DIR/extensions/dcg-guard.ts"
+        "$PWD/.omp/extensions/dcg-guard.ts"
+    )
+    local extension
+    for extension in "${extensions[@]}"; do
+        mkdir -p "$(dirname "$extension")"
+        printf '// dcg-omp-extension: generated\n' > "$extension"
+    done
+
+    run report_omp_uninstall_inventory
+
+    [ "$status" -eq 0 ]
+    for extension in "${extensions[@]}"; do
+        [[ "$output" == *"Oh My Pi extension ($extension)"* ]]
+        [ -f "$extension" ]
+        grep -Fxq '// dcg-omp-extension: generated' "$extension"
+    done
+}
+
+@test "OMP pre-confirmation inventory preserves and omits a near-marker user extension" {
+    QUIET=0
+    local extension="$HOME/.omp/agent/extensions/dcg-guard.ts"
+    local snapshot="$TEST_TMPDIR/dcg-guard.user.ts"
+    mkdir -p "$(dirname "$extension")"
+    printf '// DCG-OMP-EXTENSION: belongs to the user\nexport default function mine() {}\n' > "$extension"
+    cp "$extension" "$snapshot"
+
+    run report_omp_uninstall_inventory
+
+    [ "$status" -eq 1 ]
+    [[ "$output" != *"Oh My Pi extension"* ]]
+    cmp -s "$snapshot" "$extension"
+}
+
+@test "OMP pre-confirmation inventory surfaces incomplete profile enumeration" {
+    QUIET=0
+    local profiles_root="$HOME/.omp/profiles"
+    local extension="$profiles_root/work/agent/extensions/dcg-guard.ts"
+    mkdir -p "$(dirname "$extension")"
+    printf '// dcg-omp-extension: generated\n' > "$extension"
+    find() {
+        [ "${1:-}" != "$profiles_root" ] || return 1
+        command find "$@"
+    }
+
+    run report_omp_uninstall_inventory
+    unset -f find
+
+    [ "$status" -eq 2 ]
+    [[ "$output" == *"Oh My Pi extension inventory is incomplete"* ]]
+    [[ "$output" != *"Nothing to remove"* ]]
+    [ -f "$extension" ]
+}
+
+@test "unconfigure_omp: removes marker-owned extension only" {
+    extract_uninstall_functions
+    mkdir -p "$HOME/.omp/agent/extensions"
+    printf '// dcg-omp-extension: generated\n' > "$HOME/.omp/agent/extensions/dcg-guard.ts"
+
+    run unconfigure_omp
+
+    [ "$status" -eq 0 ]
+    [ ! -f "$HOME/.omp/agent/extensions/dcg-guard.ts" ]
+}
+
+@test "unconfigure_omp: resolves the active named profile" {
+    extract_uninstall_functions
+    export OMP_PROFILE="work"
+    local extension="$HOME/.omp/profiles/work/agent/extensions/dcg-guard.ts"
+    mkdir -p "$(dirname "$extension")"
+    printf '// dcg-omp-extension: generated\n' > "$extension"
+
+    run unconfigure_omp
+
+    [ "$status" -eq 0 ]
+    [ ! -f "$extension" ]
+}
+
+@test "unconfigure_omp: removes marker-owned extensions from inactive profiles" {
+    extract_uninstall_functions
+    local default_extension="$HOME/.omp/agent/extensions/dcg-guard.ts"
+    local work_extension="$HOME/.omp/profiles/work/agent/extensions/dcg-guard.ts"
+    local team_extension="$HOME/.omp/profiles/team/agent/extensions/dcg-guard.ts"
+    local user_extension="$HOME/.omp/profiles/personal/agent/extensions/dcg-guard.ts"
+    mkdir -p "$(dirname "$default_extension")" "$(dirname "$work_extension")" \
+        "$(dirname "$team_extension")" "$(dirname "$user_extension")"
+    printf '// dcg-omp-extension: generated\n' > "$default_extension"
+    printf '// dcg-omp-extension: generated\n' > "$work_extension"
+    printf '// dcg-omp-extension: generated\n' > "$team_extension"
+    printf 'export default function mine() {}\n' > "$user_extension"
+
+    run unconfigure_omp
+
+    [ "$status" -eq 0 ]
+    [ ! -f "$default_extension" ]
+    [ ! -f "$work_extension" ]
+    [ ! -f "$team_extension" ]
+    grep -q 'mine' "$user_extension"
+}
+
+@test "unconfigure_omp: does not walk to a parent Git project's extension" {
+    extract_uninstall_functions
+    local repo="$BATS_TEST_TMPDIR/omp-project"
+    local nested="$repo/a/b"
+    local extension="$repo/.omp/extensions/dcg-guard.ts"
+    mkdir -p "$repo/.git" "$nested" "$(dirname "$extension")"
+    printf '// dcg-omp-extension: generated\n' > "$extension"
+
+    cd "$nested"
+    run unconfigure_omp
+
+    [ "$status" -eq 0 ]
+    [ -f "$extension" ]
+}
+
+@test "unconfigure_omp: removes a project extension from a non-Git cwd" {
+    extract_uninstall_functions
+    local cwd="$BATS_TEST_TMPDIR/omp-project-no-git"
+    local extension="$cwd/.omp/extensions/dcg-guard.ts"
+    mkdir -p "$(dirname "$extension")"
+    printf '// dcg-omp-extension: generated\n' > "$extension"
+
+    cd "$cwd"
+    run unconfigure_omp
+
+    [ "$status" -eq 0 ]
+    [ ! -f "$extension" ]
+}
+
+@test "unconfigure_omp: invalid profile safely uses the default agent override" {
+    extract_uninstall_functions
+    export OMP_PROFILE="con"
+    export PI_CODING_AGENT_DIR="$HOME/custom-omp-agent"
+    local extension="$PI_CODING_AGENT_DIR/extensions/dcg-guard.ts"
+    mkdir -p "$(dirname "$extension")"
+    printf '// dcg-omp-extension: generated\n' > "$extension"
+
+    run unconfigure_omp
+
+    [ "$status" -eq 0 ]
+    [ ! -f "$extension" ]
+}
+
+@test "unconfigure_omp: preserves a user-owned extension" {
+    extract_uninstall_functions
+    mkdir -p "$HOME/.omp/agent/extensions"
+    printf 'export default function mine() {}\n' > "$HOME/.omp/agent/extensions/dcg-guard.ts"
+
+    run unconfigure_omp
+
+    [ "$status" -eq 0 ]
+    grep -q 'mine' "$HOME/.omp/agent/extensions/dcg-guard.ts"
+}
+
+@test "unconfigure_omp: warns and withholds success when deletion fails" {
+    extract_uninstall_functions
+    local default_extension="$HOME/.omp/agent/extensions/dcg-guard.ts"
+    local profile_extension="$HOME/.omp/profiles/work/agent/extensions/dcg-guard.ts"
+    mkdir -p "$(dirname "$default_extension")" "$(dirname "$profile_extension")"
+    printf '// dcg-omp-extension: generated\n' > "$default_extension"
+    printf '// dcg-omp-extension: generated\n' > "$profile_extension"
+    rm() {
+        local arg
+        local target=""
+        for arg in "$@"; do target="$arg"; done
+        [ "$target" != "$profile_extension" ] || return 1
+        command rm "$@"
+    }
+
+    run unconfigure_omp
+    unset -f rm
+
+    [ "$status" -eq 0 ]
+    [ ! -f "$default_extension" ]
+    [ -f "$profile_extension" ]
+    [[ "$output" == *"Could not remove Oh My Pi extension at $profile_extension"* ]]
+    local warning_count
+    warning_count=$(printf '%s\n' "$output" | grep -cF "Could not remove Oh My Pi extension at $profile_extension")
+    [ "$warning_count" -eq 1 ]
+    [[ $'\n'"$output"$'\n' != *$'\nremoved\n'* ]]
+}
+
+@test "unconfigure_omp: a successful no-op remover cannot forge removal success" {
+    extract_uninstall_functions
+    local extension="$HOME/.omp/agent/extensions/dcg-guard.ts"
+    mkdir -p "$(dirname "$extension")"
+    printf '// dcg-omp-extension: generated\n' > "$extension"
+    local before
+    before=$(cat "$extension")
+    rm() { return 0; }
+
+    run unconfigure_omp
+    [ "$status" -eq 0 ]
+    [ -f "$extension" ]
+    [[ "$output" == *"Could not remove Oh My Pi extension at $extension"* ]]
+    local warning_count
+    warning_count=$(printf '%s\n' "$output" | grep -cF "Could not remove Oh My Pi extension at $extension")
+    [ "$warning_count" -eq 1 ]
+    [[ $'\n'"$output"$'\n' != *$'\nremoved\n'* ]]
+
+    run report_unconfigure "Oh My Pi extension" unconfigure_omp
+    unset -f rm
+
+    [ "$status" -eq 0 ]
+    [ -f "$extension" ]
+    [ "$(cat "$extension")" = "$before" ]
+    warning_count=$(printf '%s\n' "$output" | grep -cF "Could not remove Oh My Pi extension at $extension")
+    [ "$warning_count" -eq 1 ]
+    [[ "$output" != *"Removed Oh My Pi extension"* ]]
+}
+
+@test "unconfigure_omp: warns and withholds the removed marker when marker inspection fails" {
+    extract_uninstall_functions
+    local default_extension="$HOME/.omp/agent/extensions/dcg-guard.ts"
+    local profile_extension="$HOME/.omp/profiles/work/agent/extensions/dcg-guard.ts"
+    mkdir -p "$(dirname "$default_extension")" "$(dirname "$profile_extension")"
+    printf '// dcg-omp-extension: generated\n' > "$default_extension"
+    printf '// dcg-omp-extension: generated\n' > "$profile_extension"
+    grep() {
+        local arg
+        for arg in "$@"; do
+            [ "$arg" != "$profile_extension" ] || return 2
+        done
+        command grep "$@"
+    }
+
+    run unconfigure_omp
+    unset -f grep
+
+    [ "$status" -eq 0 ]
+    [ ! -f "$default_extension" ]
+    [ -f "$profile_extension" ]
+    [[ "$output" == *"Could not inspect Oh My Pi extension at $profile_extension"* ]]
+    [[ $'\n'"$output"$'\n' != *$'\nremoved\n'* ]]
+}
+
+@test "unconfigure_omp: warns and withholds the removed marker when profile enumeration fails" {
+    extract_uninstall_functions
+    local default_extension="$HOME/.omp/agent/extensions/dcg-guard.ts"
+    local profile_extension="$HOME/.omp/profiles/work/agent/extensions/dcg-guard.ts"
+    local profiles_root="$HOME/.omp/profiles"
+    mkdir -p "$(dirname "$default_extension")" "$(dirname "$profile_extension")"
+    printf '// dcg-omp-extension: generated\n' > "$default_extension"
+    printf '// dcg-omp-extension: generated\n' > "$profile_extension"
+    find() {
+        [ "${1:-}" != "$profiles_root" ] || return 1
+        command find "$@"
+    }
+
+    run unconfigure_omp
+    unset -f find
+
+    [ "$status" -eq 0 ]
+    [ ! -f "$default_extension" ]
+    [ -f "$profile_extension" ]
+    [[ "$output" == *"Could not inspect Oh My Pi profiles under $profiles_root"* ]]
+    [[ $'\n'"$output"$'\n' != *$'\nremoved\n'* ]]
 }
